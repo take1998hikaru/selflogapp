@@ -1,0 +1,2237 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Self Care Log</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel" data-type="module">
+// ═══════════════════════════════════════════
+//  Storage Layer
+// ═══════════════════════════════════════════
+const KEYS = {
+  logs: 'selfcare_logs',
+  diary: 'selfcare_diary',
+  todos: 'selfcare_todos',
+  weather: 'selfcare_weather',
+  streak: 'selfcare_streak',
+  schedule: 'selfcare_schedule',
+};
+
+// ── Gist同期設定 ──
+const SYNC_TOKEN_KEY = 'selfcare_sync_token';
+const SYNC_GIST_KEY = 'selfcare_sync_gist_id';
+const SYNC_LAST_KEY = 'selfcare_sync_last';
+const GIST_FILENAME = 'selfcare_log_data.json';
+
+function getSyncToken() { return localStorage.getItem(SYNC_TOKEN_KEY) || ''; }
+function setSyncToken(t) { localStorage.setItem(SYNC_TOKEN_KEY, t); }
+function getSyncGistId() { return localStorage.getItem(SYNC_GIST_KEY) || ''; }
+function setSyncGistId(id) { localStorage.setItem(SYNC_GIST_KEY, id); }
+function getLastSyncTime() { return localStorage.getItem(SYNC_LAST_KEY) || ''; }
+function setLastSyncTime() { localStorage.setItem(SYNC_LAST_KEY, new Date().toISOString()); }
+
+let _syncSaveCount = 0;
+
+function _get(key) {
+  try { return JSON.parse(localStorage.getItem(key)) || []; }
+  catch { return []; }
+}
+function _set(key, data) {
+  localStorage.setItem(key, JSON.stringify(data));
+  // 5回保存ごとにGist自動同期
+  _syncSaveCount++;
+  if (_syncSaveCount >= 5 && getSyncToken()) {
+    _syncSaveCount = 0;
+    syncToGist(() => {});
+  }
+}
+
+// ── Gist同期関数 ──
+function _getAllLocalData() {
+  return {
+    logs: _get(KEYS.logs),
+    diary: _get(KEYS.diary),
+    todos: _get(KEYS.todos),
+    weather: _get(KEYS.weather),
+    streak: (() => { try { return JSON.parse(localStorage.getItem(KEYS.streak)) || {}; } catch { return {}; } })(),
+  };
+}
+
+function _mergeData(local, remote) {
+  // Logs: merge by date+type, take newer updatedAt
+  const mergedLogs = [...local.logs];
+  (remote.logs || []).forEach(r => {
+    const idx = mergedLogs.findIndex(l => l.date === r.date && l.type === r.type);
+    if (idx < 0) mergedLogs.push(r);
+    else if ((r.updatedAt || r.createdAt || '') > (mergedLogs[idx].updatedAt || mergedLogs[idx].createdAt || '')) mergedLogs[idx] = r;
+  });
+
+  // Diary: merge by date, take newer
+  const mergedDiary = [...local.diary];
+  (remote.diary || []).forEach(r => {
+    const idx = mergedDiary.findIndex(d => d.date === r.date);
+    if (idx < 0) mergedDiary.push(r);
+    else if ((r.updatedAt || r.createdAt || '') > (mergedDiary[idx].updatedAt || mergedDiary[idx].createdAt || '')) mergedDiary[idx] = r;
+  });
+
+  // Todos: merge by id, take newer
+  const mergedTodos = [...local.todos];
+  (remote.todos || []).forEach(r => {
+    const idx = mergedTodos.findIndex(t => t.id === r.id);
+    if (idx < 0) mergedTodos.push(r);
+    else if ((r.createdAt || '') > (mergedTodos[idx].createdAt || '')) mergedTodos[idx] = r;
+  });
+
+  // Streak: take higher count
+  const mergedStreak = (local.streak?.count || 0) >= (remote.streak?.count || 0) ? (local.streak || {}) : (remote.streak || {});
+
+  return { logs: mergedLogs, diary: mergedDiary, todos: mergedTodos, weather: local.weather || [], streak: mergedStreak };
+}
+
+function _applyData(data) {
+  localStorage.setItem(KEYS.logs, JSON.stringify(data.logs || []));
+  localStorage.setItem(KEYS.diary, JSON.stringify(data.diary || []));
+  localStorage.setItem(KEYS.todos, JSON.stringify(data.todos || []));
+  if (data.streak) localStorage.setItem(KEYS.streak, JSON.stringify(data.streak));
+}
+
+function syncToGist(callback) {
+  const token = getSyncToken();
+  if (!token) { if (callback) callback('トークン未設定'); return; }
+
+  const gistId = getSyncGistId();
+  const localData = _getAllLocalData();
+
+  if (!gistId) {
+    fetch('https://api.github.com/gists', {
+      method: 'POST',
+      headers: { 'Authorization': 'token ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        description: 'Self Care Log データ',
+        public: false,
+        files: { [GIST_FILENAME]: { content: JSON.stringify(localData) } }
+      })
+    }).then(res => {
+      if (!res.ok) throw new Error('Gist作成失敗: ' + res.status);
+      return res.json();
+    }).then(data => {
+      setSyncGistId(data.id);
+      setLastSyncTime();
+      if (callback) callback(null, 'Gist作成完了');
+    }).catch(e => { if (callback) callback(e.message); });
+  } else {
+    fetch('https://api.github.com/gists/' + gistId, {
+      headers: { 'Authorization': 'token ' + token }
+    }).then(res => {
+      if (!res.ok) throw new Error('Gist取得失敗: ' + res.status);
+      return res.json();
+    }).then(data => {
+      let remoteData = {};
+      try {
+        const file = data.files[GIST_FILENAME];
+        if (file) remoteData = JSON.parse(file.content);
+      } catch(e) {}
+
+      const merged = _mergeData(localData, remoteData);
+      _applyData(merged);
+
+      return fetch('https://api.github.com/gists/' + gistId, {
+        method: 'PATCH',
+        headers: { 'Authorization': 'token ' + token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          files: { [GIST_FILENAME]: { content: JSON.stringify(merged) } }
+        })
+      });
+    }).then(res => {
+      if (!res.ok) throw new Error('Gist更新失敗: ' + res.status);
+      setLastSyncTime();
+      if (callback) callback(null, '同期完了');
+    }).catch(e => { if (callback) callback(e.message); });
+  }
+}
+
+function connectSync(token) {
+  return new Promise((resolve, reject) => {
+    fetch('https://api.github.com/user', {
+      headers: { 'Authorization': 'token ' + token }
+    }).then(res => {
+      if (!res.ok) throw new Error('無効なトークンです');
+      return res.json();
+    }).then(() => {
+      setSyncToken(token);
+      return fetch('https://api.github.com/gists?per_page=100', {
+        headers: { 'Authorization': 'token ' + token }
+      });
+    }).then(res => {
+      if (!res.ok) throw new Error('Gist一覧取得失敗');
+      return res.json();
+    }).then(gists => {
+      const found = gists.find(g => g.files && g.files[GIST_FILENAME]);
+      if (found) setSyncGistId(found.id);
+      syncToGist((err, msg) => {
+        if (err) reject(err);
+        else resolve(msg);
+      });
+    }).catch(e => reject(e.message));
+  });
+}
+
+function disconnectSync() {
+  localStorage.removeItem(SYNC_TOKEN_KEY);
+  localStorage.removeItem(SYNC_GIST_KEY);
+  localStorage.removeItem(SYNC_LAST_KEY);
+}
+
+const DB = {
+  _pad(n) { return n < 10 ? '0' + n : '' + n; },
+  _toDateStr(d) { return d.getFullYear() + '-' + DB._pad(d.getMonth()+1) + '-' + DB._pad(d.getDate()); },
+
+  today() { return DB._toDateStr(new Date()); },
+
+  formatDate(dateStr) {
+    const d = new Date(dateStr + 'T00:00:00');
+    const days = ['日','月','火','水','木','金','土'];
+    return `${d.getMonth()+1}/${d.getDate()}（${days[d.getDay()]}）`;
+  },
+
+  shiftDate(dateStr, days) {
+    const d = new Date(dateStr + 'T00:00:00');
+    d.setDate(d.getDate() + days);
+    return DB._toDateStr(d);
+  },
+
+  // ── Logs ──
+  getLogs()         { return _get(KEYS.logs); },
+  getLogByDate(date, type) { return _get(KEYS.logs).find(l => l.date === date && l.type === type) || null; },
+  saveLog(entry) {
+    const logs = _get(KEYS.logs);
+    const idx = logs.findIndex(l => l.date === entry.date && l.type === entry.type);
+    if (idx >= 0) logs[idx] = { ...logs[idx], ...entry, updatedAt: new Date().toISOString() };
+    else logs.push({ ...entry, createdAt: new Date().toISOString() });
+    _set(KEYS.logs, logs);
+    if (entry.date === DB.today()) DB.updateStreak();
+  },
+
+  // ── Diary ──
+  getDiaries()          { return _get(KEYS.diary); },
+  getDiaryByDate(date)  { return _get(KEYS.diary).find(d => d.date === date) || null; },
+  saveDiary(entry) {
+    const diaries = _get(KEYS.diary);
+    const idx = diaries.findIndex(d => d.date === entry.date);
+    if (idx >= 0) diaries[idx] = { ...diaries[idx], ...entry, updatedAt: new Date().toISOString() };
+    else diaries.push({ ...entry, createdAt: new Date().toISOString() });
+    _set(KEYS.diary, diaries);
+  },
+
+  // ── Todos ──
+  getTodos() {
+    const todos = _get(KEYS.todos);
+    let migrated = false;
+    todos.forEach(t => {
+      if (t.done !== undefined && !t.status) {
+        t.status = t.done ? 'done' : 'todo';
+        delete t.done;
+        migrated = true;
+      }
+      if (!t.status) { t.status = 'todo'; migrated = true; }
+      if (!t.priority) { t.priority = 'medium'; migrated = true; }
+      if (!t.type) { t.type = 'habit'; migrated = true; }
+      if (!t.dueDate && t.type === 'event') { t.dueDate = t.date || DB.today(); migrated = true; }
+    });
+    if (migrated) _set(KEYS.todos, todos);
+    return todos;
+  },
+  saveTodo(todo) {
+    const todos = DB.getTodos();
+    if (todo.id) {
+      const idx = todos.findIndex(t => t.id === todo.id);
+      if (idx >= 0) todos[idx] = { ...todos[idx], ...todo };
+    } else {
+      todo.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      todo.createdAt = new Date().toISOString();
+      todo.status = todo.status || 'todo';
+      todo.priority = todo.priority || 'medium';
+      todo.type = todo.type || 'habit';
+      todo.memo = todo.memo || '';
+      if (todo.type === 'event') todo.dueDate = todo.dueDate || DB.today();
+      todos.push(todo);
+    }
+    _set(KEYS.todos, todos);
+    return todo;
+  },
+  deleteTodo(id) { _set(KEYS.todos, _get(KEYS.todos).filter(t => t.id !== id)); },
+  cycleTodoStatus(id) {
+    const todos = DB.getTodos();
+    const t = todos.find(t => t.id === id);
+    if (t) {
+      const cycle = { todo: 'doing', doing: 'done', done: 'todo' };
+      t.status = cycle[t.status] || 'todo';
+    }
+    _set(KEYS.todos, todos);
+    return t;
+  },
+
+  // ── Weather ──
+  getWeatherByDate(date) { return _get(KEYS.weather).find(w => w.date === date) || null; },
+  saveWeather(entry) {
+    const data = _get(KEYS.weather);
+    const idx = data.findIndex(w => w.date === entry.date);
+    if (idx >= 0) data[idx] = { ...data[idx], ...entry };
+    else data.push(entry);
+    _set(KEYS.weather, data);
+  },
+
+  // ── Streak ──
+  getStreak() {
+    try { return JSON.parse(localStorage.getItem(KEYS.streak)) || { count: 0, lastDate: '' }; }
+    catch { return { count: 0, lastDate: '' }; }
+  },
+  updateStreak() {
+    const streak = DB.getStreak();
+    const t = DB.today();
+    const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+    if (streak.lastDate === t) return streak;
+    streak.count = (streak.lastDate === yesterday) ? streak.count + 1 : 1;
+    streak.lastDate = t;
+    localStorage.setItem(KEYS.streak, JSON.stringify(streak));
+    return streak;
+  },
+
+  getAllDates() {
+    const dates = new Set();
+    _get(KEYS.logs).forEach(l => dates.add(l.date));
+    _get(KEYS.diary).forEach(d => dates.add(d.date));
+    return [...dates].sort().reverse();
+  },
+
+  // ── CSV エクスポート ──
+  exportCSV() {
+    const logs = _get(KEYS.logs);
+    const todos = _get(KEYS.todos);
+    const diaries = _get(KEYS.diary);
+
+    function esc(v) {
+      if (v == null) return '';
+      const s = String(v);
+      return s.includes(',') || s.includes('"') || s.includes('\n')
+        ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }
+    function row(...cells) { return cells.map(esc).join(','); }
+
+    const lines = [];
+
+    // 朝ログ
+    lines.push('## 朝ログ');
+    lines.push(row('日付','起床時間','気分','体調','睡眠の質','朝活','朝活内容','メモ'));
+    logs.filter(l => l.type === 'morning').sort((a,b) => a.date.localeCompare(b.date)).forEach(l => {
+      lines.push(row(l.date, l.wakeTime, l.mood, l.bodyCondition, l.sleepQuality,
+        l.morningActivity === 'yes' ? 'やった' : l.morningActivity === 'no' ? 'できなかった' : '',
+        l.morningActivityNote, l.morningNote));
+    });
+
+    lines.push('');
+    // 夜ログ
+    lines.push('## 夜ログ');
+    lines.push(row('日付','就寝予定','気分','運動','運動内容','明日の最優先タスク','感謝・よかったこと','振り返り'));
+    logs.filter(l => l.type === 'night').sort((a,b) => a.date.localeCompare(b.date)).forEach(l => {
+      lines.push(row(l.date, l.bedTime, l.mood,
+        l.exerciseDone === 'yes' ? 'やった' : l.exerciseDone === 'no' ? '休み' : '',
+        l.exercise, l.tomorrowGoal, l.gratitude, l.reflection));
+    });
+
+    lines.push('');
+    // Todo
+    lines.push('## Todo');
+    lines.push(row('タスク名','重要度','期限','状態','メモ','作成日'));
+    const prioLabel = { high: '高', medium: '中', low: '低' };
+    const statusLabel = { todo: '未着手', doing: '進行中', done: '完了' };
+    todos.sort((a,b) => (a.dueDate||'').localeCompare(b.dueDate||'')).forEach(t => {
+      lines.push(row(t.text, prioLabel[t.priority]||t.priority, t.dueDate,
+        statusLabel[t.status]||t.status, t.memo, t.createdAt?.slice(0,10)));
+    });
+
+    lines.push('');
+    // 日記
+    lines.push('## 日記');
+    lines.push(row('日付','内容'));
+    diaries.sort((a,b) => a.date.localeCompare(b.date)).forEach(d => {
+      lines.push(row(d.date, d.content));
+    });
+
+    const csv = '\uFEFF' + lines.join('\r\n'); // BOM付きUTF-8
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `selfcare_log_${DB.today()}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
+
+  // ── Gistから同期（起動時）──
+  async initFromGist() {
+    const token = getSyncToken();
+    const gistId = getSyncGistId();
+    if (!token || !gistId) return;
+
+    try {
+      const res = await fetch('https://api.github.com/gists/' + gistId, {
+        headers: { 'Authorization': 'token ' + token }
+      });
+      if (!res.ok) return;
+      const gist = await res.json();
+      const file = gist.files[GIST_FILENAME];
+      if (!file) return;
+      const remoteData = JSON.parse(file.content);
+      const localData = _getAllLocalData();
+      const merged = _mergeData(localData, remoteData);
+      _applyData(merged);
+      setLastSyncTime();
+    } catch (_) { /* オフライン時はlocalStorageのみで動作 */ }
+  },
+
+  // ── 朝活の統計 ──
+  getMorningActivityStats() {
+    const logs = _get(KEYS.logs).filter(l => l.type === 'morning' && l.morningActivity === 'yes');
+    const totalDays = logs.length;
+
+    // 連続日数を計算
+    if (totalDays === 0) return { totalDays: 0, streakDays: 0 };
+
+    const dates = logs.map(l => l.date).sort().reverse();
+    let streakDays = 0;
+    let checkDate = DB.today();
+
+    // 今日の朝ログがあるかチェック
+    const todayLog = _get(KEYS.logs).find(l => l.type === 'morning' && l.date === checkDate);
+    if (!todayLog || todayLog.morningActivity !== 'yes') {
+      // 今日まだやってなければ昨日から数える
+      checkDate = DB.shiftDate(checkDate, -1);
+    }
+
+    for (let i = 0; i < 365; i++) {
+      const hasActivity = dates.includes(checkDate);
+      if (hasActivity) {
+        streakDays++;
+        checkDate = DB.shiftDate(checkDate, -1);
+      } else {
+        break;
+      }
+    }
+
+    return { totalDays, streakDays };
+  },
+
+  // ── 今日の優先順位 ──
+  getTodayPriorityCats() {
+    const today = DB.today();
+    const yesterday = DB.shiftDate(today, -1);
+    const lastNight = DB.getLogByDate(yesterday, 'night');
+    // 今日チェックしたものは done でも表示する
+    const checkedToday = (() => {
+      try {
+        const stored = JSON.parse(localStorage.getItem('selfcare_priority_checked'));
+        if (stored && stored.date === today) return stored.items;
+        return {};
+      } catch { return {}; }
+    })();
+    const todos = DB.getTodos().filter(t => t.status !== 'done' || checkedToday[t.id]);
+    const doy = Math.floor((new Date() - new Date(new Date().getFullYear(), 0, 0)) / 86400000);
+
+    const impMap = { high: 3, medium: 2, low: 1 };
+    function score(t) {
+      if (!t.dueDate) return (impMap[t.priority] || 2) * 10;
+      const diff = Math.ceil((new Date(t.dueDate + 'T00:00:00') - new Date(today + 'T00:00:00')) / 86400000);
+      const urg = diff <= 0 ? 5 : diff <= 1 ? 4 : diff <= 3 ? 3 : diff <= 7 ? 2 : 1;
+      return (impMap[t.priority] || 2) * urg * 10;
+    }
+
+    const mustItems = [];
+    const shouldItems = [];
+    const couldItems = [];
+
+    // 1. must: 昨夜の目標（すべて）
+    if (lastNight?.tomorrowGoal) {
+      mustItems.push({
+        text: lastNight.tomorrowGoal, note: '昨夜に設定した目標',
+        type: 'goal', source: 'nightLog', cat: 'must', score: 9999,
+        todoType: null,
+      });
+    }
+
+    // 2. must: 今日が期限のイベントTodo（すべて）
+    todos.filter(t => t.type === 'event' && t.dueDate === today).forEach(t => {
+      mustItems.push({ text: t.text, note: t.memo || '', type: 'todo', source: 'todo', id: t.id, cat: 'must', score: score(t), todoType: 'event', dueDate: t.dueDate });
+    });
+
+    // 3. should: 習慣Todo スコア高い順 最大2件（mustと重複するテキストは除外）
+    const mustTexts = new Set(mustItems.map(i => i.text.trim()));
+    const habitTodos = todos
+      .filter(t => t.type === 'habit' && !mustTexts.has(t.text.trim()))
+      .map(t => ({ text: t.text, note: t.memo || '', type: 'todo', source: 'todo', id: t.id, cat: 'should', score: score(t), todoType: 'habit' }))
+      .sort((a, b) => b.score - a.score);
+    shouldItems.push(...habitTodos.slice(0, 2));
+
+    // 4. should が2件未満なら AI習慣提案で補充
+    const habitPool = [
+      { text: '養老孟司の本を3ページだけ読む', note: 'たった3ページでも習慣になる' },
+      { text: 'ハムストリングスを30秒×2セット伸ばす', note: 'デスクワーク後の張りをほぐす' },
+      { text: '今日のタンパク質源を1つ確認する', note: '鶏むね・卵・豆腐など意識するだけでOK' },
+      { text: '好きな世界史の動画を1本だけ見る（10分以内）', note: '好奇心を満たす小さな学習' },
+      { text: '政治経済ニュースを10分だけ読む', note: '日銀・為替・インフレ動向を把握' },
+      { text: '資産形成で気づいたことを1行メモする', note: 'スマホのメモアプリでOK' },
+    ];
+    if (shouldItems.length < 2) {
+      shouldItems.push({
+        text: habitPool[doy % habitPool.length].text,
+        note: habitPool[doy % habitPool.length].note,
+        type: 'suggest', source: 'habit', cat: 'should', score: 35, todoType: null,
+      });
+    }
+
+    // 5. could: 期限切れ/低優先Todoイベント + AI提案 最大3件
+    todos
+      .filter(t => t.type === 'event' && t.dueDate !== today)
+      .sort((a, b) => score(b) - score(a))
+      .slice(0, 2)
+      .forEach(t => couldItems.push({ text: t.text, note: t.memo || '', type: 'todo', source: 'todo', id: t.id, cat: 'could', score: score(t), todoType: 'event', dueDate: t.dueDate }));
+
+    const couldPool = [
+      { text: '行きたい場所を1つだけ検索する', note: '旅の妄想が気分転換になる' },
+      { text: '今月の支出を1項目だけ見直す', note: 'コンビニ代・サブスク等を確認' },
+      { text: '今夜だけ好きなゲームを30分楽しむ', note: 'ご褒美タイムで継続モチベを維持' },
+      { text: '図書館・Amazonで気になる本を1冊調べる', note: 'タイトルをメモするだけでOK' },
+      { text: '明朝着る服を今夜セットしておく', note: '朝の選択肢を1つ減らす' },
+      { text: '好きな曲を1曲だけかけてぼーっとする', note: '5分のリセットタイム' },
+      { text: '引き出しやデスク周りを5分だけ整える', note: '小さな整理で気持ちもスッキリ' },
+      { text: '近所を10分だけ散歩する', note: '外の空気が思考をクリアにする' },
+      { text: '好きなYouTubeを1本だけ見る（15分以内）', note: 'ダラ見しないための時間制限つき' },
+      { text: '今週うまくいったことを1つ思い出す', note: '自分をほめる習慣が自己肯定感に' },
+      { text: '体重・体調を一言だけメモする', note: '記録は振り返りの材料になる' },
+      { text: '寝る前に明日やることを1つだけ決める', note: '朝の迷いがゼロになる' },
+    ];
+    const remaining = 3 - couldItems.length;
+    for (let k = 0; k < remaining; k++) {
+      const c = couldPool[(doy + k * 4) % couldPool.length];
+      couldItems.push({ text: c.text, note: c.note, type: 'suggest', source: 'ai', cat: 'could', score: 10 - k, todoType: null });
+    }
+
+    const catColor = { must: 'red', should: 'gold', could: 'green' };
+    const result = [
+      ...mustItems.map(item => ({ ...item, label: '最優先', dot: catColor.must })),
+      ...shouldItems.map(item => ({ ...item, label: 'できればやる', dot: catColor.should })),
+      ...couldItems.slice(0, 3).map(item => ({ ...item, label: '余裕があれば', dot: catColor.could })),
+    ];
+    return result;
+  },
+
+  // ── 旧: 今日やること (Home用) ──
+  getTodayPriorities() {
+    const today = DB.today();
+    const items = [];
+
+    // 1. 昨晩の夜ログ「明日の最優先タスク」
+    const yesterday = DB.shiftDate(today, -1);
+    const lastNight = DB.getLogByDate(yesterday, 'night');
+    if (lastNight?.tomorrowGoal) {
+      items.push({ text: lastNight.tomorrowGoal, type: 'goal', priority: 'high', sortScore: 300 });
+    }
+
+    // 2. Todos (未完了)
+    const todos = DB.getTodos().filter(t => t.status !== 'done');
+    const prioScore = { high: 80, medium: 50, low: 20 };
+    todos.forEach(t => {
+      const isOverdue = t.dueDate && t.dueDate <= today;
+      const isDoing = t.status === 'doing';
+      const daysUntilDue = t.dueDate ? Math.floor((new Date(t.dueDate + 'T00:00:00') - new Date(today + 'T00:00:00')) / 86400000) : 999;
+      const dueSoon = daysUntilDue <= 2 ? 40 : 0;
+      items.push({
+        text: t.text, type: 'todo', priority: t.priority, status: t.status, id: t.id,
+        sortScore: (prioScore[t.priority]||0) + (isDoing ? 30 : 0) + (isOverdue ? 60 : 0) + dueSoon,
+      });
+    });
+
+    items.sort((a, b) => b.sortScore - a.sortScore);
+    return items.slice(0, 3);
+  },
+};
+
+// ═══════════════════════════════════════════
+//  今日の一言 メッセージプール (仕様書準拠)
+// ═══════════════════════════════════════════
+const DAILY_MESSAGES = [
+  { theme:'習慣', quote:'小さな行動を毎日繰り返すことが、やがて"あなた自身"になる',
+    body:'環境が変わらなくても、毎日の小さな行動が積み重なれば、いつの間にか自分が変わっている。朝活はその一つ。難しく考えない。繰り返すだけでいい。',
+    cta:'今日もただ繰り返そう' },
+  { theme:'行動', quote:'考えすぎる前に、1センチだけ動く',
+    body:'完璧な準備を待っていると、永遠に動けない。ノートを開く、靴を履く——その1センチの行動が、残りの99センチを引き出す。',
+    cta:'まず1センチだけ動こう' },
+  { theme:'環境', quote:'人は環境の産物である',
+    body:'意志力より、環境の設計が強い。朝に行動できるかは"気合い"ではなく"仕組み"で決まる。ルーティンが整えば、考えなくても動ける。',
+    cta:'今日も仕組みで動こう' },
+  { theme:'継続', quote:'続けることより、やめないことが大事',
+    body:'モチベーションが低い日もある。完璧にできない日もある。それでもやめなければ、続いている。最低限でいい。今日も途切れさせないことが勝ち。',
+    cta:'最低限でいいから今日もやろう' },
+  { theme:'思考', quote:'準備の9割は、始めることだ',
+    body:'始める前に感じる"重さ"は、始めてしまえば消える。脳は慣れていないことを大げさに怖がる。でも動き出せば、自然と続きが見えてくる。',
+    cta:'考えずに始めよう' },
+  { theme:'習慣', quote:'1日サボっても、2日は休まない',
+    body:'完璧主義が習慣を壊す。1回サボっても失敗じゃない。2回連続サボったとき、習慣は崩れ始める。今日は今日の自分を動かすことだけ考えよう。',
+    cta:'昨日より今日。今日だけやろう' },
+  { theme:'行動', quote:'感情は後からついてくる',
+    body:'やる気があるから動けるのではない。動くからやる気が生まれる。何もしたくない朝こそ、10秒だけ体を動かしてみる。感情は行動の後を追ってくる。',
+    cta:'やる気を待つな、動け' },
+  { theme:'継続', quote:'川は石を避けない。流れ続けるから道ができる',
+    body:'障害があっても、立ち止まらなければ道は開ける。完璧な条件は来ない。今日の自分のペースで、ただ流れ続けることが強さだ。',
+    cta:'今日も流れ続けよう' },
+  { theme:'環境', quote:'眠る前の5分が、朝の自分を決める',
+    body:'夜に翌朝の準備をしておく人は、朝に選択肢を減らせる。着るものを決めておく、記録するだけでいい。朝の自分に優しくしてあげよう。',
+    cta:'今夜、明日の自分に1つ仕込んでおこう' },
+  { theme:'思考', quote:'比べるなら、昨日の自分と',
+    body:'他人の進捗は関係ない。1ヶ月前の自分より、今日の自分が少し前にいれば、それで十分だ。毎日の記録がそれを証明してくれる。',
+    cta:'昨日の自分を1ミリ超えよう' },
+  { theme:'習慣', quote:'歯磨きと同じ。理由なく続ける',
+    body:'歯磨きに気合いはいらない。当たり前だから。朝活もそこを目指す。意識しなくてもやっている、そのレベルまで繰り返し続けることが目標だ。',
+    cta:'今日は"考えずに"始めよう' },
+  { theme:'行動', quote:'完了は完璧に勝る',
+    body:'完璧にやろうとすると、始められない。でも「とりあえずやった」は積み上がる。雑でいい、短くていい。今日も終わらせることだけ考えよう。',
+    cta:'雑でいいから今日も終わらせよう' },
+  { theme:'継続', quote:'毎日0.1%の改善が、1年で38倍の差を生む',
+    body:'感じられないほど小さな積み重ねが、1年後に圧倒的な差になる。今日の朝活は小さすぎて意味がないように見える。でもその積み上げが未来を作る。',
+    cta:'今日の小さな一歩を踏もう' },
+  { theme:'思考', quote:'ルールを作ると、迷わない',
+    body:'「今日はどうしようか」と考える時間が一番の無駄。「毎朝これをやる」と決めてしまえば、脳がオフでも体が動く。迷いをなくすのが最強の戦略だ。',
+    cta:'今日のルーティンをこなそう' },
+  { theme:'習慣', quote:'記録することで、行動が変わる',
+    body:'数字が見えると、人は動きたくなる。このアプリに記録するのは自己分析ではなく、自分への約束を可視化するためだ。記録が続くほど、やめにくくなる。',
+    cta:'今日の記録を残そう' },
+  { theme:'環境', quote:'朝の時間は、邪魔されない最後の砦',
+    body:'仕事のメール、SNS、他人の要求——全ては昼から始まる。朝の時間だけは完全に自分のものだ。その時間に何をするかで、1日の質が決まる。',
+    cta:'今朝の時間を自分のために使おう' },
+  { theme:'行動', quote:'迷ったら、動く方を選ぶ',
+    body:'迷っている時間は、どちらにも進んでいない。動いて失敗しても学びがある。動かない後悔は何も残らない。迷ったら、動く側を選ぶだけでいい。',
+    cta:'今日、迷ったら動こう' },
+  { theme:'継続', quote:'ゆっくりでも、前に進んでいれば十分',
+    body:'早さではなく、方向が大事だ。昨日より少しでも前にいる自分を認めてあげよう。急ぐ必要はない。ただ、止まらないことだけを守ろう。',
+    cta:'今日も前に進もう' },
+  { theme:'思考', quote:'今日の気分より、今日のルーティンを信じる',
+    body:'気分が良い日も悪い日も、ルーティンは待ってくれない。気分に関係なく動ける仕組みを作った人が、長期で勝つ。今日の気分はどうでもいい。',
+    cta:'気分を無視して動こう' },
+  { theme:'習慣', quote:'最初の30秒が全てを決める',
+    body:'始めるまでが一番重い。でも始めてしまえば、惰性で続く。脳は動き出すまでを大げさに嫌がる生き物だ。最初の30秒だけ乗り越えよう。',
+    cta:'最初の30秒を乗り越えよう' },
+];
+
+function getTodayMessage() {
+  const dayOfYear = Math.floor((new Date() - new Date(new Date().getFullYear(), 0, 0)) / 86400000);
+  return DAILY_MESSAGES[dayOfYear % DAILY_MESSAGES.length];
+}
+
+// ═══════════════════════════════════════════
+//  XP / レベルシステム
+// ═══════════════════════════════════════════
+// 朝活+両ログ=40XP/日 × 30日 = 1200XP でバラモス討伐
+const XP_LEVELS = [0, 50, 130, 250, 400, 580, 780, 980, 1100, 1200, 9999999];
+const LEVEL_NAMES = ['旅の者','見習い冒険者','冒険者','勇者の卵','若き勇者','熟練の戦士','勇者','超戦士','伝説の勇者','⚔️バラモス討伐！'];
+
+function calcXP() {
+  const logs = _get(KEYS.logs);
+  let xp = 0;
+  logs.forEach(l => {
+    if (l.type === 'morning') {
+      xp += 10;
+      if (l.morningActivity === 'yes') xp += 20;
+    }
+    if (l.type === 'night') {
+      xp += 10;
+      if (l.exerciseDone === 'yes') xp += 20;
+    }
+  });
+  return xp;
+}
+
+function getLevel(xp) {
+  let lv = 1;
+  for (let i = 1; i < XP_LEVELS.length; i++) {
+    if (xp >= XP_LEVELS[i]) lv = i + 1; else break;
+  }
+  return Math.min(lv, XP_LEVELS.length - 1);
+}
+
+function getLevelProgress(xp) {
+  const lv = getLevel(xp);
+  const base = XP_LEVELS[lv - 1];
+  const next = XP_LEVELS[lv] || XP_LEVELS[lv - 1];
+  const pct = next === base ? 100 : Math.round(((xp - base) / (next - base)) * 100);
+  return { lv, xp, base, next, pct, name: LEVEL_NAMES[Math.min(lv - 1, LEVEL_NAMES.length - 1)] };
+}
+
+// ═══════════════════════════════════════════
+//  Weather API (今日+明日の予報)
+// ═══════════════════════════════════════════
+async function fetchWeatherForecast() {
+  try {
+    const url = 'https://api.open-meteo.com/v1/forecast?latitude=34.6937&longitude=135.5023'
+      + '&current=temperature_2m,relative_humidity_2m,weather_code,apparent_temperature,wind_speed_10m'
+      + '&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max'
+      + '&hourly=precipitation_probability'
+      + '&timezone=Asia%2FTokyo&forecast_days=2';
+    const res = await fetch(url);
+    const data = await res.json();
+    const c = data.current;
+    const d = data.daily;
+    const h = data.hourly;
+
+    const codeMap = { 0:'快晴',1:'晴れ',2:'くもり',3:'曇天',45:'霧',48:'霧氷',51:'小雨',53:'雨',55:'強い雨',61:'小雨',63:'雨',65:'大雨',71:'小雪',73:'雪',75:'大雪',80:'にわか雨',81:'にわか雨',82:'豪雨',95:'雷雨',96:'雷雨(雹)' };
+    const emojiMap = (code) => code<=1?'☀️':code<=3?'☁️':code<=48?'🌫️':code<=55?'🌦️':code<=65?'🌧️':code<=75?'❄️':code<=82?'🌧️':'⛈️';
+
+    // 時間別降水確率から午前(6-12時)・午後(12-18時)を計算
+    function getPrecipAMPM(dayIndex) {
+      const baseHour = dayIndex * 24;
+      const amHours = h.precipitation_probability.slice(baseHour + 6, baseHour + 12);
+      const pmHours = h.precipitation_probability.slice(baseHour + 12, baseHour + 18);
+      const amMax = amHours.length > 0 ? Math.max(...amHours) : 0;
+      const pmMax = pmHours.length > 0 ? Math.max(...pmHours) : 0;
+      return { am: amMax, pm: pmMax };
+    }
+
+    const todayPrecip = getPrecipAMPM(0);
+    const tomorrowPrecip = getPrecipAMPM(1);
+
+    const forecast = {
+      date: DB.today(),
+      current: {
+        temp: c.temperature_2m, humidity: c.relative_humidity_2m,
+        feelsLike: c.apparent_temperature, windSpeed: c.wind_speed_10m,
+        code: c.weather_code, description: codeMap[c.weather_code]||'不明',
+        emoji: emojiMap(c.weather_code),
+      },
+      today: {
+        code: d.weather_code[0], description: codeMap[d.weather_code[0]]||'不明',
+        emoji: emojiMap(d.weather_code[0]),
+        high: d.temperature_2m_max[0], low: d.temperature_2m_min[0],
+        precipAM: todayPrecip.am, precipPM: todayPrecip.pm,
+      },
+      tomorrow: {
+        code: d.weather_code[1], description: codeMap[d.weather_code[1]]||'不明',
+        emoji: emojiMap(d.weather_code[1]),
+        high: d.temperature_2m_max[1], low: d.temperature_2m_min[1],
+        precipAM: tomorrowPrecip.am, precipPM: tomorrowPrecip.pm,
+      },
+      fetchedAt: new Date().toISOString(),
+    };
+
+    // 従来互換のためcurrentもsaveWeatherで保存
+    DB.saveWeather({ date: DB.today(), temp: c.temperature_2m, humidity: c.relative_humidity_2m,
+      feelsLike: c.apparent_temperature, windSpeed: c.wind_speed_10m,
+      code: c.weather_code, description: codeMap[c.weather_code]||'不明',
+      emoji: emojiMap(c.weather_code), fetchedAt: new Date().toISOString() });
+
+    return forecast;
+  } catch (e) { console.warn('Weather fetch failed:', e); return null; }
+}
+
+// ═══════════════════════════════════════════
+//  Components
+// ═══════════════════════════════════════════
+const { useState, useEffect, useRef, useCallback } = React;
+
+function useToast() {
+  const [msg, setMsg] = useState('');
+  const show = (m) => { setMsg(m); setTimeout(() => setMsg(''), 2200); };
+  const el = msg ? <div className="toast">{msg}</div> : null;
+  return [el, show];
+}
+
+function Header({ title, subtitle, right }) {
+  return (
+    <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+      <div>
+        <h1 style={{ fontSize: '1.7rem', fontWeight: 400, letterSpacing: '0.5px' }}>{title}</h1>
+        {subtitle && <p style={{ fontSize: '0.9rem', color: 'var(--text)', opacity: 0.55, marginTop: 5 }}>{subtitle}</p>}
+      </div>
+      {right && <div>{right}</div>}
+    </div>
+  );
+}
+
+// ── Weather Icon (SVG) ──
+function WeatherIcon({ code, size = 48 }) {
+  const s = size;
+  if (code <= 1) return (
+    <svg width={s} height={s} viewBox="0 0 64 64">
+      <circle cx="32" cy="32" r="14" fill="#FFB800" />
+      {[0,45,90,135,180,225,270,315].map(a => (
+        <line key={a} x1="32" y1="32" x2={32+Math.cos(a*Math.PI/180)*24} y2={32+Math.sin(a*Math.PI/180)*24}
+          stroke="#FFB800" strokeWidth="3" strokeLinecap="round" />
+      ))}
+    </svg>
+  );
+  if (code <= 3) return (
+    <svg width={s} height={s} viewBox="0 0 64 64">
+      <circle cx="22" cy="24" r="10" fill="#FFB800" opacity="0.7" />
+      <ellipse cx="32" cy="38" rx="20" ry="12" fill="#8899aa" opacity="0.9" />
+      <ellipse cx="24" cy="34" rx="12" ry="10" fill="#99aabc" />
+      <ellipse cx="40" cy="36" rx="10" ry="9" fill="#8899aa" />
+    </svg>
+  );
+  if (code <= 48) return (
+    <svg width={s} height={s} viewBox="0 0 64 64">
+      <line x1="12" y1="24" x2="52" y2="24" stroke="#8899aa" strokeWidth="4" strokeLinecap="round" opacity="0.6"/>
+      <line x1="16" y1="34" x2="48" y2="34" stroke="#8899aa" strokeWidth="4" strokeLinecap="round" opacity="0.4"/>
+      <line x1="14" y1="44" x2="50" y2="44" stroke="#8899aa" strokeWidth="4" strokeLinecap="round" opacity="0.3"/>
+    </svg>
+  );
+  if (code <= 65) return (
+    <svg width={s} height={s} viewBox="0 0 64 64">
+      <ellipse cx="32" cy="24" rx="20" ry="12" fill="#6688aa" />
+      <ellipse cx="24" cy="20" rx="12" ry="10" fill="#7799bb" />
+      <ellipse cx="40" cy="22" rx="10" ry="9" fill="#6688aa" />
+      <line x1="20" y1="40" x2="18" y2="50" stroke="#4a9eff" strokeWidth="2.5" strokeLinecap="round" />
+      <line x1="32" y1="40" x2="30" y2="52" stroke="#4a9eff" strokeWidth="2.5" strokeLinecap="round" />
+      <line x1="44" y1="40" x2="42" y2="48" stroke="#4a9eff" strokeWidth="2.5" strokeLinecap="round" />
+    </svg>
+  );
+  if (code <= 75) return (
+    <svg width={s} height={s} viewBox="0 0 64 64">
+      <ellipse cx="32" cy="22" rx="20" ry="12" fill="#8899aa" />
+      <circle cx="20" cy="42" r="3" fill="#e4e4e4" opacity="0.8"/>
+      <circle cx="32" cy="46" r="3" fill="#e4e4e4" opacity="0.8"/>
+      <circle cx="44" cy="40" r="3" fill="#e4e4e4" opacity="0.8"/>
+    </svg>
+  );
+  return (
+    <svg width={s} height={s} viewBox="0 0 64 64">
+      <ellipse cx="32" cy="20" rx="22" ry="13" fill="#556677" />
+      <polygon points="30,32 24,44 34,42 28,56" fill="#FFD700" />
+      <line x1="42" y1="36" x2="40" y2="46" stroke="#4a9eff" strokeWidth="2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+// ── Today's Message Component ──
+function TodayMessage() {
+  const msg = getTodayMessage();
+  return (
+    <div className="today-msg-card">
+      <div className="today-msg-label">
+        今日の一言
+        <span className="today-msg-theme">{msg.theme}</span>
+      </div>
+      <div className="today-msg-quote">「{msg.quote}」</div>
+      <div className="today-msg-body">{msg.body}</div>
+      <div className="today-msg-cta">👉 {msg.cta}</div>
+    </div>
+  );
+}
+
+// ── XP Bar Component ──
+function XPBar() {
+  const { lv, xp, base, next, pct, name } = getLevelProgress(calcXP());
+  return (
+    <div className="xp-bar-wrap">
+      <div className="xp-bar-header">
+        <span className="xp-level-badge">Lv.{lv} {name}</span>
+        <span className="xp-text">{xp} / {next} XP</span>
+      </div>
+      <div className="xp-bar-track">
+        <div className="xp-bar-fill" style={{ width: `${pct}%` }} />
+      </div>
+    </div>
+  );
+}
+
+// ── Weekly Calendar (直近7日) ──
+function WeeklyCalendar({ onDayClick }) {
+  const days = ['日','月','火','水','木','金','土'];
+  const today = DB.today();
+  const cells = Array.from({ length: 7 }, (_, i) => {
+    const date = DB.shiftDate(today, i - 6);
+    const m = DB.getLogByDate(date, 'morning');
+    const n = DB.getLogByDate(date, 'night');
+    const hasActivity = m?.morningActivity === 'yes';
+    const hasBoth = !!m && !!n;
+    const hasAny = !!m || !!n;
+    const d = new Date(date + 'T00:00:00');
+    const dayLabel = days[d.getDay()];
+    const dayNum = d.getDate();
+    const isToday = date === today;
+
+    let dotClass = 'empty', dotLabel = dayNum;
+    if (hasActivity && hasBoth) { dotClass = 'star'; dotLabel = '★'; }
+    else if (hasActivity || hasBoth) { dotClass = 'logged'; }
+    else if (hasAny) { dotClass = 'partial'; }
+    if (isToday && dotClass === 'empty') dotClass = 'empty today';
+    else if (isToday) dotClass += ' today';
+
+    return { dayLabel, dayNum, dotClass, dotLabel, date };
+  });
+
+  return (
+    <div className="week-calendar">
+      {cells.map((c, i) => (
+        <div key={i} className="week-day"
+          style={{ cursor: onDayClick ? 'pointer' : 'default' }}
+          onClick={() => onDayClick && onDayClick(c.date)}>
+          <span className="week-day-label">{c.dayLabel}</span>
+          <div className={`week-day-dot ${c.dotClass}`}>{c.dotLabel}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── Calendar Date Picker ──
+function CalendarPicker({ date, onChange }) {
+  const [viewDate, setViewDate] = useState(date);
+  const [open, setOpen] = useState(false);
+
+  const selectedYear = parseInt(date.slice(0, 4));
+  const selectedMonth = parseInt(date.slice(5, 7));
+  const selectedDay = parseInt(date.slice(8, 10));
+
+  const viewYear = parseInt(viewDate.slice(0, 4));
+  const viewMonth = parseInt(viewDate.slice(5, 7));
+
+  function getDaysInMonth(y, m) {
+    return new Date(y, m, 0).getDate();
+  }
+  function getFirstDayOfWeek(y, m) {
+    return new Date(y, m - 1, 1).getDay();
+  }
+  function pad(n) { return n < 10 ? '0' + n : '' + n; }
+
+  function shiftMonth(delta) {
+    let y = viewYear, m = viewMonth + delta;
+    if (m > 12) { m = 1; y++; }
+    if (m < 1) { m = 12; y--; }
+    setViewDate(`${y}-${pad(m)}-01`);
+  }
+
+  function selectDay(day) {
+    const newDate = `${viewYear}-${pad(viewMonth)}-${pad(day)}`;
+    onChange(newDate);
+    setOpen(false);
+  }
+
+  const daysInMonth = getDaysInMonth(viewYear, viewMonth);
+  const firstDay = getFirstDayOfWeek(viewYear, viewMonth);
+  const dayNames = ['日','月','火','水','木','金','土'];
+
+  return (
+    <div className="calendar-picker">
+      <div className="date-nav">
+        <button onClick={() => onChange(DB.shiftDate(date, -1))}>←</button>
+        <div className="date-nav-center" style={{cursor:'pointer'}} onClick={() => { setViewDate(date); setOpen(!open); }}>
+          <span className="date-nav-label">日付を選択</span>
+          <span style={{ fontSize:'0.9rem', fontWeight:500, color:'var(--text)' }}>{DB.formatDate(date)}</span>
+        </div>
+        <button onClick={() => onChange(DB.shiftDate(date, 1))}>→</button>
+      </div>
+
+      {open && (
+        <div className="calendar-grid-wrap">
+          <div className="calendar-header">
+            <button onClick={() => shiftMonth(-1)}>←</button>
+            <span>{viewYear}年{viewMonth}月</span>
+            <button onClick={() => shiftMonth(1)}>→</button>
+          </div>
+          <div className="calendar-grid">
+            {dayNames.map(d => <div key={d} className="calendar-day-name">{d}</div>)}
+            {Array.from({ length: firstDay }, (_, i) => <div key={'e'+i} />)}
+            {Array.from({ length: daysInMonth }, (_, i) => {
+              const day = i + 1;
+              const isSelected = viewYear === selectedYear && viewMonth === selectedMonth && day === selectedDay;
+              const isToday = `${viewYear}-${pad(viewMonth)}-${pad(day)}` === DB.today();
+              return (
+                <button key={day}
+                  className={`calendar-day ${isSelected ? 'selected' : ''} ${isToday ? 'today' : ''}`}
+                  onClick={() => selectDay(day)}>
+                  {day}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═════════════════════════════
+//  Home
+// ═════════════════════════════
+function Home({ navigate }) {
+  const [forecast, setForecast] = useState(null);
+  const [activityStats, setActivityStats] = useState({ totalDays: 0, streakDays: 0 });
+  const [status, setStatus] = useState({});
+  const [priorityItems, setPriorityItems] = useState([]);
+  const [toastEl, showToast] = useToast();
+
+  // チェック状態をlocalStorageで永続化（日付キーで翌日自動リセット）
+  const CHECKED_KEY = 'selfcare_priority_checked';
+  const getCheckedFromStorage = () => {
+    try {
+      const stored = JSON.parse(localStorage.getItem(CHECKED_KEY));
+      if (stored && stored.date === DB.today()) return stored.items;
+      return {};
+    } catch { return {}; }
+  };
+  const [checkedItems, setCheckedItems] = useState(getCheckedFromStorage);
+  const saveChecked = (items) => {
+    setCheckedItems(items);
+    localStorage.setItem(CHECKED_KEY, JSON.stringify({ date: DB.today(), items }));
+  };
+
+  const refresh = useCallback(() => {
+    const today = DB.today();
+    const morning = DB.getLogByDate(today, 'morning');
+    const night   = DB.getLogByDate(today, 'night');
+    const diary   = DB.getDiaryByDate(today);
+    setStatus({ morning: !!morning, night: !!night, diary: !!diary });
+    setPriorityItems(DB.getTodayPriorityCats());
+    setActivityStats(DB.getMorningActivityStats());
+  }, []);
+
+  useEffect(() => {
+    fetchWeatherForecast().then(f => { if (f) setForecast(f); });
+    refresh();
+    // 季節を設定
+    const m = new Date().getMonth() + 1;
+    const season = m >= 3 && m <= 5 ? 'spring' : m >= 6 && m <= 8 ? 'summer' : m >= 9 && m <= 11 ? 'autumn' : 'winter';
+    document.body.setAttribute('data-season', season);
+  }, []);
+
+  // チェック即完了ハンドラ
+  const handleCheck = (itemKey, item) => {
+    if (checkedItems[itemKey]) return; // 既にチェック済み
+    const today = DB.today();
+
+    // Todo のステータス更新
+    if (item.id) {
+      const todos = DB.getTodos();
+      const todo = todos.find(t => t.id === item.id);
+      if (todo) {
+        if (!todo.progressLogs) todo.progressLogs = [];
+        todo.progressLogs.push({ date: today, note: '✓' });
+        if (todo.type === 'event' || (todo.dueDate && todo.dueDate <= today)) {
+          todo.status = 'done';
+        }
+        DB.saveTodo(todo);
+      }
+    }
+
+    // チェック状態を永続化
+    const updated = { ...checkedItems, [itemKey]: true };
+    saveChecked(updated);
+    showToast('✓ 完了しました！');
+  };
+
+  const hour = new Date().getHours();
+  const greeting = hour < 11 ? 'おはよう' : hour < 17 ? 'こんにちは' : 'おつかれさま';
+  const typeColors = { goal: 'var(--blue)', todo: 'var(--accent)' };
+  const typeLabels = { goal: '昨夜の目標', todo: 'Todo' };
+
+  // 朝活モチベーションメッセージ
+  const { streakDays, totalDays } = activityStats;
+  const motivMsg = (() => {
+    if (streakDays >= 100) return { text: `🏆 ${streakDays}日連続！レジェンド級の継続力です`, color: 'var(--gold)' };
+    if (streakDays >= 30)  return { text: `🔥 ${streakDays}日連続継続中！習慣が完全に定着してる`, color: 'var(--orange)' };
+    if (streakDays >= 14)  return { text: `⚡ ${streakDays}日連続！2週間突破、本物の習慣になってきた`, color: 'var(--orange)' };
+    if (streakDays >= 7)   return { text: `🌟 ${streakDays}日連続！1週間達成、すごい継続力！`, color: 'var(--gold)' };
+    if (streakDays >= 3)   return { text: `💪 ${streakDays}日連続中、いい調子！このまま続けよう`, color: 'var(--accent)' };
+    if (streakDays === 2)  return { text: `✨ 2日連続！昨日に続いて今日も朝活しよう`, color: 'var(--accent)' };
+    if (totalDays === 0)   return { text: `☀️ 今日から朝活を記録しよう！小さな一歩が大きな変化に`, color: 'var(--dim)' };
+    return { text: `🌱 また今日から積み上げよう。リスタートも立派な一歩`, color: 'var(--accent)' };
+  })();
+
+  return (
+    <div className="page">
+      <Header
+        title={`${greeting}、ひかる`}
+        right={
+          <div style={{ textAlign: 'right', lineHeight: 1.3 }}>
+            <div style={{ fontSize: '1rem', fontWeight: 500 }}>
+              {new Date().toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'})}
+            </div>
+            <div style={{ fontSize: '0.75rem', color: 'var(--dim)', marginTop: 2 }}>
+              {DB.formatDate(DB.today())}
+            </div>
+          </div>
+        }
+      />
+
+      {/* 今日の一言 */}
+      <TodayMessage />
+
+      {/* XPバー */}
+      <XPBar />
+
+      {/* モチベーションメッセージ */}
+      <div style={{
+        padding: '9px 14px', marginBottom: 12,
+        background: `${motivMsg.color}10`,
+        border: `1px solid ${motivMsg.color}30`,
+        borderRadius: 10, fontSize: '0.82rem', color: motivMsg.color,
+        fontWeight: 500,
+      }}>
+        {motivMsg.text}
+      </div>
+
+      {/* 朝活ストリーク */}
+      <div className="card">
+        <div className="card-title" style={{ marginBottom: 8 }}>
+          <span>朝活ストリーク</span>
+          <span style={{ color: 'var(--accent)', fontSize: '0.78rem', fontWeight: 600 }}>
+            🔥 {activityStats.streakDays}日連続
+          </span>
+        </div>
+        <div style={{ display: 'flex', gap: 20, alignItems: 'center', marginBottom: 12 }}>
+          <div style={{ textAlign: 'center' }}>
+            <div className="streak-num">{activityStats.totalDays}</div>
+            <div className="streak-label">総日数</div>
+          </div>
+          <div style={{ width: 1, height: 32, background: 'var(--border)' }} />
+          <div style={{ textAlign: 'center' }}>
+            <div className="streak-num">{activityStats.streakDays}</div>
+            <div className="streak-label">連続</div>
+          </div>
+          <div style={{ width: 1, height: 32, background: 'var(--border)' }} />
+          <div style={{ flex: 1, textAlign: 'right' }}>
+            <div className="quick-status" style={{ justifyContent: 'flex-end' }}>
+              <span className={`status-chip ${status.morning?'done':''}`}>{status.morning?'✓':'○'} 朝</span>
+              <span className={`status-chip ${status.night?'done':''}`}>{status.night?'✓':'○'} 夜</span>
+            </div>
+          </div>
+        </div>
+        <WeeklyCalendar onDayClick={(date) => navigate('log', null, date)} />
+        <div style={{ fontSize: '0.6rem', color: 'var(--dim)', marginTop: 6, textAlign: 'right' }}>
+          ★=朝活+両ログ　●=ログ済み　△=一部　○=なし
+        </div>
+        <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap', justifyContent: 'center' }}>
+          {[
+            { label: '朝ログ', xp: 10, color: 'var(--gold)' },
+            { label: '朝活',   xp: 20, color: 'var(--orange)' },
+            { label: '夜ログ', xp: 10, color: 'var(--blue)' },
+            { label: '運動',   xp: 20, color: 'var(--accent)' },
+          ].map(({ label, xp, color }) => (
+            <div key={label} style={{
+              display: 'flex', alignItems: 'center', gap: 3,
+              padding: '3px 8px', borderRadius: 20,
+              background: `${color}12`, border: `1px solid ${color}30`,
+              fontSize: '0.62rem',
+            }}>
+              <span style={{ color }}>{label}</span>
+              <span style={{ color, fontWeight: 700 }}>+{xp}XP</span>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* 本日の優先順位（スコアリング式・最大3件） */}
+      <div className="card">
+        <div className="card-title"><span>TODAY — 本日の優先順位</span></div>
+        {priorityItems.length === 0 ? (
+          <div className="no-priority">優先タスクはありません</div>
+        ) : priorityItems.map((a, i) => {
+          const showHeader = i === 0 || a.label !== priorityItems[i-1].label;
+          const catKey = a.cat === 'must' ? 'top' : a.cat === 'should' ? 'medium' : 'low';
+          const badgeCls = a.type === 'todo' ? 'todo' : a.type === 'goal' ? 'goal' : 'suggest';
+          const badgeLabel = a.type === 'todo' ? 'Todo' : a.type === 'goal' ? '夜ログ' : a.source === 'habit' ? '習慣' : 'AI提案';
+          let typeTag = null;
+          if (a.todoType === 'event' && a.dueDate) {
+            const d = new Date(a.dueDate + 'T00:00:00');
+            typeTag = `[${d.getMonth()+1}/${d.getDate()}締切]`;
+          } else if (a.todoType === 'habit') {
+            typeTag = '[習慣]';
+          }
+          const itemKey = a.id || a.text;
+          const isChecked = !!checkedItems[itemKey];
+          const canCheck = a.type === 'todo' || a.type === 'goal';
+          return (
+            <React.Fragment key={i}>
+              {showHeader && (
+                <div className="priority-cat-header" style={{ marginTop: i > 0 ? 10 : 0 }}>
+                  <span className={`priority-cat-dot ${a.dot}`} />
+                  {a.label}
+                </div>
+              )}
+              <div className={`priority-item2 cat-${catKey}`} style={{
+                marginBottom: 5,
+                opacity: isChecked ? 0.5 : 1,
+                transition: 'opacity 0.3s',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, width: '100%' }}>
+                  {canCheck && (
+                    <button
+                      onClick={(e) => { e.stopPropagation(); handleCheck(itemKey, a); }}
+                      style={{
+                        flexShrink: 0, width: 26, height: 26, borderRadius: '50%',
+                        border: isChecked ? 'none' : '2px solid var(--dim)',
+                        background: isChecked ? 'var(--accent)' : 'transparent',
+                        color: isChecked ? '#fff' : 'var(--dim)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: '0.8rem', cursor: isChecked ? 'default' : 'pointer',
+                        transition: 'all 0.2s',
+                      }}
+                    >
+                      {isChecked ? '✓' : '○'}
+                    </button>
+                  )}
+                  <div style={{ flex: 1, minWidth: 0 }} onClick={() => { if (a.id && !isChecked) navigate('todo'); }}>
+                    <div className="priority-item2-content">
+                      <div className="priority-item2-text" style={{
+                        textDecoration: isChecked ? 'line-through' : 'none',
+                        color: isChecked ? 'var(--dim)' : undefined,
+                      }}>
+                        {typeTag && <span style={{ fontSize:'0.65rem', color:'var(--dim)', marginRight:5, fontWeight:500 }}>{typeTag}</span>}
+                        {a.text}
+                      </div>
+                      {a.note && !isChecked && <div className="priority-item2-note">{a.note}</div>}
+                    </div>
+                  </div>
+                  {!isChecked && <span className={`priority-item2-badge ${badgeCls}`}>{badgeLabel}</span>}
+                  {isChecked && <span style={{ fontSize: '0.7rem', color: 'var(--accent)', fontWeight: 600, flexShrink: 0 }}>完了!</span>}
+                </div>
+              </div>
+            </React.Fragment>
+          );
+        })}
+      </div>
+      {toastEl}
+
+      {/* Quick Actions */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 12 }}>
+        {!status.morning && (
+          <button className="btn-secondary" onClick={() => navigate('log', 'morning')}>☀️ 朝ログ</button>
+        )}
+        {!status.night && (
+          <button className="btn-secondary" onClick={() => navigate('log', 'night')}>🌙 夜ログ</button>
+        )}
+        <button className="btn-secondary" onClick={() => navigate('todo')}>+ Todo</button>
+      </div>
+
+      {/* 天気予報: 今日 / 明日（最下部） */}
+      {forecast && (
+        <div className="card" style={{ padding: 14 }}>
+          <div className="card-title"><span>WEATHER</span></div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+            <div className="weather-day-card">
+              <div className="weather-day-label">今日</div>
+              <WeatherIcon code={forecast.today.code} size={36} />
+              <div className="weather-day-desc">{forecast.today.description}</div>
+              <div className="weather-day-temps">
+                <span className="temp-high">{Math.round(forecast.today.high)}°</span>
+                <span className="temp-sep">/</span>
+                <span className="temp-low">{Math.round(forecast.today.low)}°</span>
+              </div>
+              <div className="weather-day-precip">
+                <span>午前 {forecast.today.precipAM}%</span>
+                <span>午後 {forecast.today.precipPM}%</span>
+              </div>
+            </div>
+            <div className="weather-day-card">
+              <div className="weather-day-label">明日</div>
+              <WeatherIcon code={forecast.tomorrow.code} size={36} />
+              <div className="weather-day-desc">{forecast.tomorrow.description}</div>
+              <div className="weather-day-temps">
+                <span className="temp-high">{Math.round(forecast.tomorrow.high)}°</span>
+                <span className="temp-sep">/</span>
+                <span className="temp-low">{Math.round(forecast.tomorrow.low)}°</span>
+              </div>
+              <div className="weather-day-precip">
+                <span>午前 {forecast.tomorrow.precipAM}%</span>
+                <span>午後 {forecast.tomorrow.precipPM}%</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═════════════════════════════
+//  Log Form
+// ═════════════════════════════
+function LogForm({ initialTab, initialDate }) {
+  const hour = new Date().getHours();
+  const [tab, setTab] = useState(initialTab || (hour < 14 ? 'morning' : 'night'));
+  const [toastEl, showToast] = useToast();
+  const [date, setDate] = useState(initialDate || DB.today());
+  const moods = ['😟','😐','🙂','😊','🔥'];
+
+  const [morning, setMorning] = useState({});
+  const [night, setNight] = useState({});
+  const [diary, setDiary] = useState('');
+  const [isDirtyM, setIsDirtyM] = useState(false);
+  const [isDirtyN, setIsDirtyN] = useState(false);
+
+  // Reset form when date changes
+  useEffect(() => {
+    const m = DB.getLogByDate(date, 'morning');
+    setMorning({
+      wakeTime: m?.wakeTime||'', sleepQuality: m?.sleepQuality||3,
+      mood: m?.mood||'',
+      bodyCondition: m?.bodyCondition||3, morningNote: m?.morningNote||'',
+      morningActivity: m?.morningActivity||'',
+      morningActivityNote: m?.morningActivityNote||'',
+    });
+    const n = DB.getLogByDate(date, 'night');
+    setNight({
+      bedTime: n?.bedTime||'', mood: n?.mood||'',
+      exerciseDone: n?.exerciseDone||'',
+      exercise: n?.exercise||'',
+      tomorrowGoal: n?.tomorrowGoal||'',
+      gratitude: n?.gratitude||'',
+      reflection: n?.reflection||'',
+    });
+    const d = DB.getDiaryByDate(date);
+    setDiary(d?.content || '');
+    setIsDirtyM(false);
+    setIsDirtyN(false);
+  }, [date]);
+
+  function saveMorning() {
+    setIsDirtyM(false);
+    DB.saveLog({ date, type: 'morning', ...morning });
+    if (morning.morningActivity === 'yes') {
+      const stats = DB.getMorningActivityStats();
+      const msgs = {
+        1: '☀️ 朝活スタート！最初の一歩が一番大事',
+        3: '🌟 3日連続！いい流れがきてる',
+        7: '🔥 1週間連続達成！本物の習慣になってきた',
+        14: '⚡ 2週間連続！もう止まらない',
+        30: '🏆 30日連続！伝説の朝活ランナー',
+      };
+      const special = msgs[stats.streakDays];
+      showToast(special || `☀️ 朝活 ${stats.streakDays}日連続中！`);
+    } else {
+      showToast('☀️ 朝ログを保存しました');
+    }
+  }
+  function saveNight() {
+    setIsDirtyN(false);
+    DB.saveLog({ date, type: 'night', ...night });
+    if (diary.trim()) DB.saveDiary({ date, content: diary });
+    showToast('🌙 保存しました！');
+  }
+
+  const mSet = (k, v) => { setMorning(p => ({...p, [k]: v})); setIsDirtyM(true); };
+  const nSet = (k, v) => { setNight(p => ({...p, [k]: v})); setIsDirtyN(true); };
+  const existsM = !!DB.getLogByDate(date, 'morning');
+  const existsN = !!DB.getLogByDate(date, 'night');
+
+  return (
+    <div className="page">
+      <Header title="ログ入力" />
+      {toastEl}
+
+      {/* Calendar Date Picker */}
+      <CalendarPicker date={date} onChange={setDate} />
+
+      <div className="tab-bar" style={{marginTop: 12}}>
+        <button className={`tab-btn ${tab==='morning'?'active':''}`} onClick={() => setTab('morning')}>☀️ 朝ログ</button>
+        <button className={`tab-btn ${tab==='night'?'active':''}`} onClick={() => setTab('night')}>🌙 夜ログ</button>
+      </div>
+
+      {/* ── Morning ── */}
+      {tab === 'morning' && (
+        <div>
+          {/* 朝活 — メインアクション（最上部・大きく） */}
+          <div className="card" style={{ textAlign: 'center', padding: '20px 16px' }}>
+            <div style={{ fontSize: '0.7rem', color: 'var(--dim)', letterSpacing: 1.5, textTransform: 'uppercase', marginBottom: 14 }}>
+              今日の朝活
+            </div>
+            <div style={{ display: 'flex', gap: 12, justifyContent: 'center' }}>
+              <button
+                onClick={() => mSet('morningActivity', morning.morningActivity === 'yes' ? '' : 'yes')}
+                style={{
+                  flex: 1, padding: '18px 0',
+                  borderRadius: 14, border: '2px solid',
+                  borderColor: morning.morningActivity === 'yes' ? 'var(--accent)' : 'var(--border)',
+                  background: morning.morningActivity === 'yes' ? 'rgba(0,200,150,0.15)' : 'var(--card2)',
+                  color: morning.morningActivity === 'yes' ? 'var(--accent)' : 'var(--dim)',
+                  fontSize: '1rem', fontWeight: 700, cursor: 'pointer',
+                  transition: 'all 0.15s', fontFamily: 'inherit',
+                  transform: morning.morningActivity === 'yes' ? 'scale(1.03)' : 'scale(1)',
+                }}>
+                ☀️<br/><span style={{fontSize:'0.8rem'}}>やった！</span>
+              </button>
+              <button
+                onClick={() => mSet('morningActivity', morning.morningActivity === 'no' ? '' : 'no')}
+                style={{
+                  flex: 1, padding: '18px 0',
+                  borderRadius: 14, border: '2px solid',
+                  borderColor: morning.morningActivity === 'no' ? 'var(--gold)' : 'var(--border)',
+                  background: morning.morningActivity === 'no' ? 'rgba(224,160,48,0.12)' : 'var(--card2)',
+                  color: morning.morningActivity === 'no' ? 'var(--gold)' : 'var(--dim)',
+                  fontSize: '1rem', fontWeight: morning.morningActivity === 'no' ? 700 : 600,
+                  cursor: 'pointer', transition: 'all 0.15s', fontFamily: 'inherit',
+                }}>
+                💤<br/><span style={{fontSize:'0.8rem'}}>今日は休み</span>
+              </button>
+            </div>
+            {morning.morningActivity === 'yes' && (
+              <input type="text" className="form-input" style={{marginTop:12, textAlign:'center'}}
+                placeholder="何をした？（ウォーキング、読書など）"
+                value={morning.morningActivityNote||''}
+                onChange={e => mSet('morningActivityNote', e.target.value)} />
+            )}
+          </div>
+
+          <div className="card">
+            <div className="card-title">MORNING CHECK</div>
+
+            <div className="form-group">
+              <label className="form-label">起床時間 *</label>
+              <select className="form-input" value={morning.wakeTime} onChange={e=>mSet('wakeTime',e.target.value)}>
+                <option value="">選択...</option>
+                {(() => {
+                  const opts = [];
+                  for (let h = 4; h <= 12; h++) {
+                    for (let m = 0; m < 60; m += 15) {
+                      const label = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+                      opts.push(<option key={label} value={label}>{label}</option>);
+                    }
+                  }
+                  return opts;
+                })()}
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">気分</label>
+              <div className="mood-picker">
+                {moods.map((m,i) => (
+                  <button key={i} className={`mood-btn ${morning.mood===m?'selected':''}`} onClick={()=>mSet('mood',m)}>{m}</button>
+                ))}
+              </div>
+            </div>
+
+            <div className="slider-group">
+              <div className="slider-header">
+                <span className="form-label">体調</span>
+                <span className="slider-val">{morning.bodyCondition}/5</span>
+              </div>
+              <input type="range" min="1" max="5" value={morning.bodyCondition} onChange={e=>mSet('bodyCondition',+e.target.value)}/>
+            </div>
+
+            <div className="slider-group">
+              <div className="slider-header">
+                <span className="form-label">睡眠の質</span>
+                <span className="slider-val">{morning.sleepQuality}/5</span>
+              </div>
+              <input type="range" min="1" max="5" value={morning.sleepQuality} onChange={e=>mSet('sleepQuality',+e.target.value)}/>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">メモ（任意）</label>
+              <textarea className="form-textarea" rows="2" placeholder="一言でもOK" value={morning.morningNote} onChange={e=>mSet('morningNote',e.target.value)}/>
+            </div>
+          </div>
+          <button className="btn-primary" onClick={saveMorning} disabled={!isDirtyM}>{existsM ? '更新する' : '保存する'}</button>
+        </div>
+      )}
+
+      {/* ── Night ── */}
+      {tab === 'night' && (
+        <div>
+          <div className="card">
+            <div className="card-title">NIGHT REVIEW</div>
+
+            <div className="form-group">
+              <label className="form-label">就寝予定時間 *（〜28時対応）</label>
+              <select className="form-input" value={night.bedTime} onChange={e=>nSet('bedTime',e.target.value)}>
+                <option value="">選択...</option>
+                {(() => {
+                  const opts = [];
+                  for (let h = 20; h <= 28; h++) {
+                    for (let m = 0; m < 60; m += 15) {
+                      if (h === 28 && m > 0) break;
+                      const label = `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
+                      opts.push(<option key={label} value={label}>{label}</option>);
+                    }
+                  }
+                  return opts;
+                })()}
+              </select>
+            </div>
+
+            <div className="form-group">
+              <label className="form-label">今日の気分</label>
+              <div className="mood-picker">
+                {moods.map((m,i) => (
+                  <button key={i} className={`mood-btn ${night.mood===m?'selected':''}`} onClick={()=>nSet('mood',m)}>{m}</button>
+                ))}
+              </div>
+            </div>
+
+            {/* 運動 (気分の下) */}
+            <div className="form-group">
+              <label className="form-label">運動</label>
+              <div className="toggle-group">
+                {[
+                  { val: 'yes', label: '💪 やった' },
+                  { val: 'no',  label: '💤 休み' },
+                ].map(opt => (
+                  <button key={opt.val}
+                    className={`toggle-btn ${night.exerciseDone === opt.val ? (opt.val==='yes'?'selected-yes':'selected-no') : ''}`}
+                    onClick={() => nSet('exerciseDone', night.exerciseDone === opt.val ? '' : opt.val)}>
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              {night.exerciseDone === 'yes' && (
+                <input type="text" className="form-input" style={{marginTop:6}}
+                  placeholder="内容（脚トレ、ウォーキングなど）"
+                  value={night.exercise}
+                  onChange={e => nSet('exercise', e.target.value)} />
+              )}
+            </div>
+
+            {/* 1. 明日の最優先タスク */}
+            <div className="form-group">
+              <label className="form-label">明日の最優先タスク <span style={{color:'var(--dim)',fontWeight:400}}>→ 翌朝ホームに表示</span></label>
+              {(() => {
+                const activeTodos = DB.getTodos().filter(t => t.status !== 'done');
+                return activeTodos.length > 0 ? (
+                  <>
+                    <select className="form-input" style={{marginBottom:6}}
+                      value={activeTodos.some(t => t.text === night.tomorrowGoal) ? night.tomorrowGoal : ''}
+                      onChange={e => { if (e.target.value) nSet('tomorrowGoal', e.target.value); }}>
+                      <option value="">Todoから選ぶ...</option>
+                      {activeTodos.map(t => <option key={t.id} value={t.text}>{t.text}</option>)}
+                    </select>
+                    <input type="text" className="form-input" placeholder="または直接入力"
+                      value={night.tomorrowGoal} onChange={e=>nSet('tomorrowGoal',e.target.value)}/>
+                  </>
+                ) : (
+                  <input type="text" className="form-input" placeholder="明日まずやること"
+                    value={night.tomorrowGoal} onChange={e=>nSet('tomorrowGoal',e.target.value)}/>
+                );
+              })()}
+            </div>
+
+            {/* 2. 感謝・よかったこと */}
+            <div className="form-group">
+              <label className="form-label">感謝・よかったこと</label>
+              <textarea className="form-textarea" rows="2" placeholder="今日感謝できること..." value={night.gratitude} onChange={e=>nSet('gratitude',e.target.value)}/>
+            </div>
+
+            {/* 3. 振り返り */}
+            <div className="form-group">
+              <label className="form-label">振り返り</label>
+              <textarea className="form-textarea" rows="2" placeholder="今日どうだった？" value={night.reflection} onChange={e=>nSet('reflection',e.target.value)}/>
+            </div>
+          </div>
+
+          <div className="card">
+            <div className="card-title">📔 DIARY（任意）</div>
+            <textarea className="form-textarea" rows="3" placeholder="一言日記..." value={diary} onChange={e=>{setDiary(e.target.value);setIsDirtyN(true);}}/>
+          </div>
+
+          <button className="btn-primary" onClick={saveNight} disabled={!isDirtyN}>{existsN ? '更新する' : '保存する'}</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═════════════════════════════
+//  Todo
+// ═════════════════════════════
+function TodoPage() {
+  const [todos, setTodos] = useState(DB.getTodos());
+  const [input, setInput] = useState('');
+  const [priority, setPriority] = useState('medium');
+  const [todoType, setTodoType] = useState('habit');
+  const [dueDate, setDueDate] = useState(DB.today());
+  const [hasDueDate, setHasDueDate] = useState(false);
+  const [filter, setFilter] = useState('active');
+  const [expandId, setExpandId] = useState(null);
+  const expandRef = React.useRef(null);
+  const refresh = () => setTodos(DB.getTodos());
+
+  React.useEffect(() => {
+    function handleOutsideClick(e) {
+      if (expandId && expandRef.current && !expandRef.current.contains(e.target)) {
+        setExpandId(null);
+      }
+    }
+    document.addEventListener('mousedown', handleOutsideClick);
+    return () => document.removeEventListener('mousedown', handleOutsideClick);
+  }, [expandId]);
+  const [progDate, setProgDate] = useState(DB.today());
+  const [progNote, setProgNote] = useState('');
+
+  function addProgressLog(todoId) {
+    if (!progNote.trim()) return;
+    const todo = todos.find(t => t.id === todoId);
+    const logs = todo?.progressLogs || [];
+    DB.saveTodo({ id: todoId, progressLogs: [...logs, { date: progDate, note: progNote.trim() }] });
+    setProgNote('');
+    refresh();
+  }
+
+  function addTodo() {
+    if (!input.trim()) return;
+    const entry = { text: input.trim(), priority, type: todoType };
+    if (hasDueDate) entry.dueDate = dueDate;
+    DB.saveTodo(entry);
+    setInput('');
+    setPriority('medium');
+    setTodoType('habit');
+    setDueDate(DB.today());
+    setHasDueDate(false);
+    refresh();
+  }
+
+  const statusLabels = { todo: '未着手', doing: '進行中', done: '完了' };
+  const prioLabels = { high: '高', medium: '中', low: '低' };
+
+  const filtered = todos
+    .filter(t => {
+      if (filter === 'active') return t.status !== 'done';
+      if (filter === 'doing') return t.status === 'doing';
+      if (filter === 'done') return t.status === 'done';
+      return true;
+    })
+    .sort((a, b) => {
+      if (a.status === 'done' && b.status !== 'done') return 1;
+      if (a.status !== 'done' && b.status === 'done') return -1;
+      if (a.status === 'doing' && b.status !== 'doing') return -1;
+      if (a.status !== 'doing' && b.status === 'doing') return 1;
+      const ps = { high: 0, medium: 1, low: 2 };
+      const aHasDate = !!a.dueDate, bHasDate = !!b.dueDate;
+      if (aHasDate && !bHasDate) return -1;
+      if (!aHasDate && bHasDate) return 1;
+      if (ps[a.priority] !== ps[b.priority]) return (ps[a.priority]||1) - (ps[b.priority]||1);
+      return (a.dueDate||'9999-99-99').localeCompare(b.dueDate||'9999-99-99');
+    });
+
+  const activeCount = todos.filter(t => t.status !== 'done').length;
+  const doingCount = todos.filter(t => t.status === 'doing').length;
+  const doneCount = todos.filter(t => t.status === 'done').length;
+
+  return (
+    <div className="page">
+      <Header title="ToDo" subtitle={`残り ${activeCount} ・ 進行中 ${doingCount} ・ 完了 ${doneCount}`}/>
+
+      {/* Add Todo: 種別 → 重要度 → 期限（イベント時のみ） → タスク名 */}
+      <div className="card" style={{ padding: 12, marginBottom: 12 }}>
+        <div className="card-title" style={{ marginBottom: 8 }}>タスクを追加</div>
+        <div style={{ display: 'flex', gap: 6, marginBottom: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+          <div style={{ flex: '0 0 auto' }}>
+            <label style={{ fontSize: '0.6rem', color: 'var(--dim)', display: 'block', marginBottom: 2 }}>種別</label>
+            <select value={todoType} onChange={e => { setTodoType(e.target.value); if (e.target.value === 'event') setHasDueDate(true); }}
+              className="form-select" style={{ padding: '7px 8px', fontSize: '0.78rem', width: 90 }}>
+              <option value="habit">習慣</option>
+              <option value="event">イベント</option>
+            </select>
+          </div>
+          <div style={{ flex: '0 0 auto' }}>
+            <label style={{ fontSize: '0.6rem', color: 'var(--dim)', display: 'block', marginBottom: 2 }}>重要度</label>
+            <select value={priority} onChange={e => setPriority(e.target.value)}
+              className="form-select" style={{ padding: '7px 8px', fontSize: '0.78rem', width: 70 }}>
+              <option value="high">高</option>
+              <option value="medium">中</option>
+              <option value="low">低</option>
+            </select>
+          </div>
+          <div style={{ flex: '0 0 auto' }}>
+            <label style={{ fontSize: '0.6rem', color: 'var(--dim)', display: 'block', marginBottom: 2 }}>期限</label>
+            <button
+              onClick={() => setHasDueDate(p => !p)}
+              style={{
+                padding: '7px 10px', borderRadius: 8, border: '1px solid',
+                borderColor: hasDueDate ? 'var(--accent)' : 'var(--border)',
+                background: hasDueDate ? 'rgba(0,200,150,0.12)' : 'var(--card2)',
+                color: hasDueDate ? 'var(--accent)' : 'var(--dim)',
+                fontSize: '0.75rem', cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600,
+              }}>
+              {hasDueDate ? '📅 設定あり' : '期限なし'}
+            </button>
+          </div>
+          {hasDueDate && (
+            <div style={{ flex: '0 0 auto' }}>
+              <label style={{ fontSize: '0.6rem', color: 'var(--dim)', display: 'block', marginBottom: 2 }}>日付</label>
+              <input type="date" value={dueDate} onChange={e => setDueDate(e.target.value)}
+                className="date-input-light" />
+            </div>
+          )}
+        </div>
+        <div className="todo-input-row" style={{ marginBottom: 0 }}>
+          <input type="text" className="form-input" placeholder="タスク名（Enter で追加）"
+            value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==='Enter')addTodo();}}/>
+          <button className="todo-add-btn" onClick={addTodo}>+</button>
+        </div>
+      </div>
+
+      <div className="todo-filter-bar">
+        {[
+          {k:'active',l:`未完了 (${activeCount})`},
+          {k:'doing',l:`進行中 (${doingCount})`},
+          {k:'all',l:`すべて (${todos.length})`},
+          {k:'done',l:`完了 (${doneCount})`},
+        ].map(f=>(
+          <button key={f.k} className={`todo-filter-btn ${filter===f.k?'active':''}`} onClick={()=>setFilter(f.k)}>{f.l}</button>
+        ))}
+      </div>
+
+      {filtered.length===0 && (
+        <div style={{textAlign:'center',color:'var(--dim)',padding:'30px 0',fontSize:'0.85rem'}}>
+          {filter==='active'?'すべて完了！🎉':'タスクがありません'}
+        </div>
+      )}
+
+      {filtered.map(todo => {
+        const isOverdue = todo.dueDate && todo.dueDate < DB.today() && todo.status !== 'done';
+        const isExpanded = expandId === todo.id;
+        return (
+          <div key={todo.id}>
+            <div className={`todo-item status-${todo.status}`}>
+              <button
+                className={`todo-status-btn ${todo.status==='doing'?'s-doing':''} ${todo.status==='done'?'s-done':''}`}
+                onClick={() => {DB.cycleTodoStatus(todo.id);refresh();}}
+              >
+                {todo.status==='done'?'✓':todo.status==='doing'?'▶':''}
+              </button>
+              <div style={{flex:1, cursor:'pointer'}} onClick={()=>setExpandId(isExpanded?null:todo.id)}>
+                <span className="todo-text">{todo.text}</span>
+                <div className="todo-meta">
+                  <span className={`todo-meta-tag ${todo.priority}`}>{prioLabels[todo.priority]}</span>
+                  {todo.dueDate && <span className={`todo-meta-tag ${isOverdue?'overdue':''}`}>
+                    {isOverdue ? '⚠ ' : ''}{DB.formatDate(todo.dueDate)}
+                  </span>}
+                  {todo.status === 'doing' && <span className="todo-meta-tag" style={{borderColor:'rgba(74,158,255,0.4)',color:'var(--blue)'}}>進行中</span>}
+                </div>
+                {todo.memo && <div className="todo-memo">{todo.memo}</div>}
+              </div>
+              <button className="todo-delete" onClick={()=>{DB.deleteTodo(todo.id);refresh();}}>✕</button>
+            </div>
+            {isExpanded && (
+              <div ref={expandRef} className="card" style={{padding:12, marginTop:-4, marginBottom:8, borderTopLeftRadius:0, borderTopRightRadius:0}}>
+                <div className="todo-expand-row" style={{marginBottom:6}}>
+                  <input type="text" value={todo.text}
+                    onChange={e=>{DB.saveTodo({id:todo.id,text:e.target.value});refresh();}}
+                    onKeyDown={e=>{if(e.key==='Enter')setExpandId(null);}}
+                    style={{width:'100%', padding:'7px 10px', background:'var(--card2)', border:'1px solid var(--accent)', borderRadius:8, color:'var(--text)', fontFamily:'inherit', fontSize:'0.88rem', fontWeight:500}}
+                    placeholder="タスク名を編集"/>
+                </div>
+                <div className="todo-expand-row">
+                  <select value={todo.type||'habit'} onChange={e=>{DB.saveTodo({id:todo.id,type:e.target.value});refresh();}}>
+                    <option value="habit">習慣</option>
+                    <option value="event">イベント</option>
+                  </select>
+                  <select value={todo.priority} onChange={e=>{DB.saveTodo({id:todo.id,priority:e.target.value});refresh();}}>
+                    <option value="high">優先: 高</option>
+                    <option value="medium">優先: 中</option>
+                    <option value="low">優先: 低</option>
+                  </select>
+                  <select value={todo.status} onChange={e=>{DB.saveTodo({id:todo.id,status:e.target.value});refresh();}}>
+                    <option value="todo">未着手</option>
+                    <option value="doing">進行中</option>
+                    <option value="done">完了</option>
+                  </select>
+                </div>
+                <div className="todo-expand-row">
+                  <label style={{fontSize:'0.62rem',color:'var(--dim)',flexShrink:0}}>期限日</label>
+                  <input type="date" value={todo.dueDate||''} onChange={e=>{DB.saveTodo({id:todo.id,dueDate:e.target.value||null});refresh();}}
+                    className="date-input-light" style={{flex:1}}/>
+                  {todo.dueDate && (
+                    <button onClick={()=>{DB.saveTodo({id:todo.id,dueDate:null});refresh();}}
+                      style={{padding:'4px 8px',background:'transparent',border:'1px solid var(--border)',borderRadius:6,color:'var(--dim)',cursor:'pointer',fontSize:'0.7rem',fontFamily:'inherit',whiteSpace:'nowrap'}}>
+                      期限なし
+                    </button>
+                  )}
+                </div>
+                <div className="todo-expand-row" style={{flexDirection:'column', gap:6}}>
+                  <div style={{display:'flex', gap:6, alignItems:'center'}}>
+                    <label style={{fontSize:'0.62rem',color:'var(--dim)',flexShrink:0}}>メモ日付</label>
+                    <input type="date" value={todo.memoDate||''} onChange={e=>{DB.saveTodo({id:todo.id,memoDate:e.target.value});refresh();}}
+                      style={{flex:1, padding:'5px 8px', background:'var(--card)', border:'1px solid var(--border)', borderRadius:6, color:'var(--text)', fontFamily:'inherit', fontSize:'0.75rem'}}/>
+                  </div>
+                  <input type="text" placeholder="メモ（任意）" value={todo.memo||''}
+                    onChange={e=>{DB.saveTodo({id:todo.id,memo:e.target.value});refresh();}}
+                    style={{width:'100%'}}/>
+                </div>
+
+                {/* 日々の記録 */}
+                <div style={{marginTop:10, borderTop:'1px solid var(--border)', paddingTop:10}}>
+                  <div style={{fontSize:'0.65rem', color:'var(--dim)', marginBottom:6, letterSpacing:'0.8px', textTransform:'uppercase'}}>日々の記録</div>
+                  {(todo.progressLogs||[]).map((log, i) => (
+                    <div key={i} style={{display:'flex', gap:8, padding:'5px 8px', background:'var(--bg)', borderRadius:6, marginBottom:4}}>
+                      <span style={{color:'var(--dim)', fontSize:'0.65rem', flexShrink:0}}>{DB.formatDate(log.date)}</span>
+                      <span style={{flex:1, fontSize:'0.78rem'}}>{log.note}</span>
+                    </div>
+                  ))}
+                  <div style={{display:'flex', gap:6, marginTop:6}}>
+                    <input type="date" value={progDate} onChange={e=>setProgDate(e.target.value)}
+                      style={{width:130, padding:'5px 6px', background:'var(--card)', border:'1px solid var(--border)', borderRadius:6, color:'var(--text)', fontFamily:'inherit', fontSize:'0.72rem'}}/>
+                    <input type="text" placeholder="感じたこと・進捗..." value={progNote}
+                      onChange={e=>setProgNote(e.target.value)}
+                      onKeyDown={e=>{if(e.key==='Enter')addProgressLog(todo.id);}}
+                      style={{flex:1, padding:'5px 8px', background:'var(--card)', border:'1px solid var(--border)', borderRadius:6, color:'var(--text)', fontFamily:'inherit', fontSize:'0.78rem'}}/>
+                    <button onClick={()=>addProgressLog(todo.id)}
+                      style={{padding:'5px 12px', background:'var(--accent)', border:'none', borderRadius:6, color:'#000', cursor:'pointer', fontSize:'0.78rem', fontFamily:'inherit', fontWeight:600}}>記録</button>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })}
+
+      {doneCount>0 && (
+        <div style={{marginTop:14,textAlign:'center'}}>
+          <button className="btn-danger" onClick={()=>{todos.filter(t=>t.status==='done').forEach(t=>DB.deleteTodo(t.id));refresh();}}>
+            完了済みを削除 ({doneCount})
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ═════════════════════════════
+//  History
+// ═════════════════════════════
+function HistoryPage() {
+  const [date, setDate] = useState(DB.today());
+  const [copyMsg, setCopyMsg] = useState('');
+
+  const mLog = DB.getLogByDate(date, 'morning');
+  const nLog = DB.getLogByDate(date, 'night');
+  const diary = DB.getDiaryByDate(date);
+  const weather = DB.getWeatherByDate(date);
+  const todos = DB.getTodos().filter(t => t.dueDate === date);
+  const hasData = mLog || nLog || diary || weather || todos.length > 0;
+
+  const generateAIReport = () => {
+    const logs = JSON.parse(localStorage.getItem('selfcare_logs') || '[]');
+    const diaries = JSON.parse(localStorage.getItem('selfcare_diary') || '[]');
+    const todoList = JSON.parse(localStorage.getItem('selfcare_todos') || '[]');
+
+    function esc(v) {
+      if (v == null) return '';
+      const s = String(v);
+      return s.includes(',') || s.includes('"') || s.includes('\n')
+        ? '"' + s.replace(/"/g, '""') + '"' : s;
+    }
+    function row(...cells) { return cells.map(esc).join(','); }
+
+    const lines = [];
+    lines.push('## 朝ログ');
+    lines.push(row('日付','起床時間','気分','体調','睡眠の質','朝活','朝活内容','メモ'));
+    logs.filter(l => l.type === 'morning').sort((a,b) => a.date.localeCompare(b.date)).forEach(l => {
+      lines.push(row(l.date, l.wakeTime, l.mood, l.bodyCondition, l.sleepQuality,
+        l.morningActivity === 'yes' ? 'やった' : l.morningActivity === 'no' ? 'できなかった' : '',
+        l.morningActivityNote, l.morningNote));
+    });
+    lines.push('');
+    lines.push('## 夜ログ');
+    lines.push(row('日付','就寝予定','気分','運動','運動内容','明日の最優先タスク','感謝・よかったこと','振り返り'));
+    logs.filter(l => l.type === 'night').sort((a,b) => a.date.localeCompare(b.date)).forEach(l => {
+      lines.push(row(l.date, l.bedTime, l.mood,
+        l.exerciseDone === 'yes' ? 'やった' : l.exerciseDone === 'no' ? '休み' : '',
+        l.exercise, l.tomorrowGoal, l.gratitude, l.reflection));
+    });
+    lines.push('');
+    lines.push('## Todo');
+    lines.push(row('タスク名','重要度','期限','状態','メモ','作成日'));
+    const prioLabel = { high: '高', medium: '中', low: '低' };
+    const statusLabel = { todo: '未着手', doing: '進行中', done: '完了' };
+    todoList.sort((a,b) => (a.dueDate||'').localeCompare(b.dueDate||'')).forEach(t => {
+      lines.push(row(t.text, prioLabel[t.priority]||t.priority, t.dueDate,
+        statusLabel[t.status]||t.status, t.memo, t.createdAt?.slice(0,10)));
+    });
+    lines.push('');
+    lines.push('## 日記');
+    lines.push(row('日付','内容'));
+    diaries.sort((a,b) => a.date.localeCompare(b.date)).forEach(d => {
+      lines.push(row(d.date, d.content));
+    });
+
+    const csvText = lines.join('\n');
+    const todayStr = DB.today(); // ローカル日付（UTC問題を回避）
+    const prompt = `私の現時点の生データです。分析してください。\n\n` + csvText;
+
+    const copyToClipboard = (text) => {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(() => {
+          setCopyMsg('✅ コピーしました！Claudeに貼り付けてください');
+          setTimeout(() => setCopyMsg(''), 4000);
+        }).catch(() => fallbackCopy(text));
+      } else {
+        fallbackCopy(text);
+      }
+    };
+
+    const fallbackCopy = (text) => {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.left = '-9999px';
+      document.body.appendChild(ta);
+      ta.select();
+      try {
+        document.execCommand('copy');
+        setCopyMsg('✅ コピーしました！Claudeに貼り付けてください');
+        setTimeout(() => setCopyMsg(''), 4000);
+      } catch(e) {
+        setCopyMsg('❌ コピーに失敗しました');
+        setTimeout(() => setCopyMsg(''), 4000);
+      }
+      document.body.removeChild(ta);
+    };
+
+    copyToClipboard(prompt);
+  };
+
+  const Field = ({label, value}) => {
+    if (!value && value !== 0) return null;
+    return <div className="history-entry"><span className="label">{label}</span><span className="value">{value}</span></div>;
+  };
+  const Bar = ({label, value, max=5}) => {
+    if (!value) return null;
+    const pct = (value/max)*100;
+    return (
+      <div className="history-entry">
+        <span className="label">{label}</span><span className="value">{value}/{max}</span>
+        <div style={{marginTop:4,height:4,background:'var(--border)',borderRadius:2,overflow:'hidden'}}>
+          <div style={{width:`${pct}%`,height:'100%',background:pct>=80?'var(--accent)':pct>=50?'var(--gold)':'var(--red)',borderRadius:2}}/>
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="page">
+      <Header
+        title="履歴"
+        subtitle="過去のログを振り返る"
+        right={
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button onClick={generateAIReport} style={{
+              padding: '6px 12px', background: 'var(--accent)',
+              border: '1px solid var(--accent)', borderRadius: 8,
+              color: '#000', fontFamily: 'inherit', fontSize: '0.72rem',
+              cursor: 'pointer', whiteSpace: 'nowrap', fontWeight: 700,
+            }}>
+              🤖 AIレポート
+            </button>
+            <button onClick={() => DB.exportCSV()} style={{
+              padding: '6px 12px', background: 'transparent',
+              border: '1px solid var(--accent)', borderRadius: 8,
+              color: 'var(--accent)', fontFamily: 'inherit', fontSize: '0.72rem',
+              cursor: 'pointer', whiteSpace: 'nowrap',
+            }}>
+              ⬇ CSV
+            </button>
+          </div>
+        }
+      />
+
+      {copyMsg && (
+        <div style={{
+          background: 'var(--card)', border: '1px solid var(--accent)',
+          borderRadius: 8, padding: '10px 14px', marginBottom: 12,
+          color: 'var(--accent)', fontSize: '0.85rem', fontWeight: 600,
+        }}>
+          {copyMsg}
+          <div style={{ color: 'var(--dim)', fontSize: '0.75rem', marginTop: 4 }}>
+            claude.ai を開いて貼り付け（Ctrl+V / ⌘V）して送信してください
+          </div>
+        </div>
+      )}
+
+      <CalendarPicker date={date} onChange={setDate} />
+
+      {weather && (
+        <div className="weather-compact" style={{marginTop: 12}}>
+          <WeatherIcon code={weather.code} size={44} />
+          <div className="weather-info">
+            <div className="weather-main">
+              <span className="weather-temp">{weather.temp}°C</span>
+              <span className="weather-desc">{weather.description}</span>
+            </div>
+            <div className="weather-details">
+              <span className="weather-detail">湿度 <span>{weather.humidity}%</span></span>
+              <span className="weather-detail">体感 <span>{weather.feelsLike}°</span></span>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {mLog && (
+        <div className="card">
+          <div className="card-title">☀️ MORNING LOG</div>
+          <Field label="起床" value={mLog.wakeTime}/>
+          <Field label="気分" value={mLog.mood}/>
+          {mLog.morningActivity && (
+            <Field label="朝活"
+              value={mLog.morningActivity === 'yes'
+                ? `✅ やった${mLog.morningActivityNote ? ` — ${mLog.morningActivityNote}` : ''}`
+                : '❌ できなかった'} />
+          )}
+          <Bar label="体調" value={mLog.bodyCondition}/>
+          <Bar label="睡眠の質" value={mLog.sleepQuality}/>
+          {mLog.morningNote && <Field label="メモ" value={mLog.morningNote}/>}
+        </div>
+      )}
+
+      {nLog && (
+        <div className="card">
+          <div className="card-title">🌙 NIGHT LOG</div>
+          <Field label="就寝" value={nLog.bedTime}/>
+          <Field label="気分" value={nLog.mood}/>
+          {nLog.exerciseDone && (
+            <Field label="運動"
+              value={nLog.exerciseDone === 'yes'
+                ? `💪 やった${nLog.exercise ? ` — ${nLog.exercise}` : ''}`
+                : '💤 休み'} />
+          )}
+          {nLog.tomorrowGoal && <Field label="明日の最優先" value={nLog.tomorrowGoal}/>}
+          {nLog.gratitude && <Field label="感謝" value={nLog.gratitude}/>}
+          {nLog.reflection && <Field label="振り返り" value={nLog.reflection}/>}
+        </div>
+      )}
+
+      {todos.length > 0 && (
+        <div className="card">
+          <div className="card-title">📋 TODO ({date})</div>
+          {todos.map(t => (
+            <div key={t.id} className="history-entry" style={{display:'flex',gap:8,alignItems:'center'}}>
+              <span style={{color: t.status==='done'?'var(--accent)':t.status==='doing'?'var(--blue)':'var(--dim)'}}>
+                {t.status==='done'?'✓':t.status==='doing'?'▶':'○'}
+              </span>
+              <span style={{textDecoration: t.status==='done'?'line-through':'none', opacity: t.status==='done'?0.5:1}}>
+                {t.text}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {diary && (
+        <div className="card">
+          <div className="card-title">📔 DIARY</div>
+          <div className="history-entry"><div className="value" style={{whiteSpace:'pre-wrap'}}>{diary.content}</div></div>
+        </div>
+      )}
+
+      {!hasData && (
+        <div className="card" style={{textAlign:'center',padding:30,color:'var(--dim)',marginTop:12}}>この日のデータはありません</div>
+      )}
+    </div>
+  );
+}
+
+// ═════════════════════════════
+//  Settings Page
+// ═════════════════════════════
+function SettingsPage() {
+  const [token, setToken] = useState('');
+  const [syncing, setSyncing] = useState(false);
+  const [status, setStatus] = useState('');
+  const isConnected = !!getSyncToken();
+  const lastSync = getLastSyncTime();
+  const toast = useToast();
+
+  const handleConnect = async () => {
+    if (!token.trim()) { toast.show('トークンを入力してください', 'error'); return; }
+    setSyncing(true);
+    setStatus('接続中...');
+    try {
+      await connectSync(token.trim());
+      setStatus('');
+      setToken('');
+      toast.show('同期を開始しました');
+    } catch (e) {
+      setStatus('');
+      toast.show('接続エラー: ' + e, 'error');
+    }
+    setSyncing(false);
+  };
+
+  const handleSync = () => {
+    setSyncing(true);
+    setStatus('同期中...');
+    syncToGist((err, msg) => {
+      setSyncing(false);
+      setStatus('');
+      if (err) toast.show('同期エラー: ' + err, 'error');
+      else toast.show('同期完了');
+    });
+  };
+
+  const handleDisconnect = () => {
+    if (!confirm('同期を解除しますか？\nデータはこの端末に残ります。')) return;
+    disconnectSync();
+    toast.show('同期を解除しました');
+  };
+
+  const handleExportCSV = () => {
+    DB.exportCSV();
+    toast.show('CSVをダウンロードしました');
+  };
+
+  const handleResetData = () => {
+    if (!confirm('すべてのデータをリセットしますか？\nこの操作は取り消せません。')) return;
+    Object.values(KEYS).forEach(k => localStorage.removeItem(k));
+    toast.show('データをリセットしました');
+  };
+
+  const formatTime = (iso) => {
+    if (!iso) return '';
+    const d = new Date(iso);
+    return `${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+  };
+
+  return (
+    <div className="page">
+      {toast.el}
+      <Header title="設定" />
+
+      <div className="card" style={{marginTop:12}}>
+        <h3 style={{margin:'0 0 12px',fontSize:'1rem',color:'var(--text)'}}>同期設定</h3>
+        {isConnected ? (
+          <>
+            <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
+              <span style={{width:10,height:10,borderRadius:'50%',background:'var(--accent)',flexShrink:0}}></span>
+              <span style={{color:'var(--accent)',fontWeight:600}}>接続済み（Gist同期ON）</span>
+            </div>
+            {lastSync && (
+              <p style={{fontSize:'0.85rem',color:'var(--dim)',margin:'0 0 12px'}}>最終同期: {formatTime(lastSync)}</p>
+            )}
+            <p style={{fontSize:'0.8rem',color:'var(--dim)',margin:'0 0 16px'}}>5回保存ごとに自動同期 / 起動時にも自動取得</p>
+            <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+              <button className="btn-action" onClick={handleSync} disabled={syncing}
+                style={{background:'var(--accent)',color:'#fff',border:'none',padding:'10px 20px',borderRadius:8,fontWeight:600,fontSize:'0.9rem'}}>
+                {syncing ? '同期中...' : '今すぐ同期'}
+              </button>
+              <button className="btn-action" onClick={handleDisconnect}
+                style={{background:'#e05555',color:'#fff',border:'none',padding:'10px 20px',borderRadius:8,fontWeight:600,fontSize:'0.9rem'}}>
+                同期を解除
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:12}}>
+              <span style={{width:10,height:10,borderRadius:'50%',background:'#666',flexShrink:0}}></span>
+              <span style={{color:'var(--dim)'}}>未接続（この端末のみ）</span>
+            </div>
+            <p style={{fontSize:'0.85rem',color:'var(--dim)',margin:'0 0 12px'}}>GitHubトークンを入力すると、PC・スマホ間でデータを同期できます。</p>
+            <div style={{display:'flex',gap:8,marginBottom:8}}>
+              <input type="password" value={token} onChange={e => setToken(e.target.value)}
+                placeholder="ghp_xxxx..."
+                style={{flex:1,background:'var(--card2)',border:'1px solid #444',borderRadius:8,padding:'10px 12px',color:'var(--text)',fontSize:'0.9rem'}} />
+              <button onClick={handleConnect} disabled={syncing}
+                style={{background:'var(--accent)',color:'#fff',border:'none',padding:'10px 16px',borderRadius:8,fontWeight:600,fontSize:'0.9rem',whiteSpace:'nowrap'}}>
+                {syncing ? '...' : '接続'}
+              </button>
+            </div>
+            <p style={{fontSize:'0.75rem',color:'var(--dim)',margin:0}}>トークンはこの端末のブラウザにのみ保存されます。</p>
+          </>
+        )}
+        {status && <p style={{color:'var(--accent)',marginTop:8,fontSize:'0.85rem'}}>{status}</p>}
+      </div>
+
+      <div className="card" style={{marginTop:12}}>
+        <h3 style={{margin:'0 0 12px',fontSize:'1rem',color:'var(--text)'}}>データ管理</h3>
+        <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
+          <button onClick={handleExportCSV}
+            style={{background:'var(--card2)',color:'var(--text)',border:'1px solid #444',padding:'10px 20px',borderRadius:8,fontWeight:600,fontSize:'0.9rem'}}>
+            CSVダウンロード
+          </button>
+          <button onClick={handleResetData}
+            style={{background:'var(--card2)',color:'var(--red)',border:'1px solid #444',padding:'10px 20px',borderRadius:8,fontWeight:600,fontSize:'0.9rem'}}>
+            データリセット
+          </button>
+        </div>
+        <p style={{fontSize:'0.75rem',color:'var(--dim)',margin:'8px 0 0'}}>CSVはいつでもダウンロードできます。分析やバックアップにご利用ください。</p>
+      </div>
+    </div>
+  );
+}
+
+// ═════════════════════════════
+//  App Root
+// ═════════════════════════════
+const Icons = {
+  home: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1m-2 0h2"/></svg>,
+  edit: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>,
+  check: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>,
+  clock: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>,
+  settings: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg>,
+};
+
+function App() {
+  const [page, setPage] = useState('home');
+  const [logTab, setLogTab] = useState(null);
+  const [logDate, setLogDate] = useState(null);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    DB.initFromGist().finally(() => setReady(true));
+  }, []);
+
+  if (!ready) return (
+    <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh',color:'#666',fontSize:'0.9rem'}}>
+      読み込み中...
+    </div>
+  );
+
+  function navigate(p, tab, date) {
+    setPage(p);
+    setLogTab(tab || null);
+    setLogDate(date || null);
+  }
+
+  const renderPage = () => {
+    switch (page) {
+      case 'home':     return <Home navigate={navigate}/>;
+      case 'log':      return <LogForm initialTab={logTab} initialDate={logDate} key={`log-${logTab||'auto'}-${logDate||''}`}/>;
+      case 'todo':     return <TodoPage/>;
+      case 'history':  return <HistoryPage/>;
+      case 'settings': return <SettingsPage/>;
+      default:         return <Home navigate={navigate}/>;
+    }
+  };
+
+  return (
+    <>
+      {renderPage()}
+      <nav className="nav-bar">
+        <div className="nav-bar-inner">
+          {[
+            {key:'home',icon:Icons.home,label:'ホーム'},
+            {key:'log',icon:Icons.edit,label:'ログ'},
+            {key:'todo',icon:Icons.check,label:'ToDo'},
+            {key:'history',icon:Icons.clock,label:'履歴'},
+            {key:'settings',icon:Icons.settings,label:'設定'},
+          ].map(item => (
+            <button key={item.key} className={`nav-item ${page===item.key?'active':''}`} onClick={()=>navigate(item.key)}>
+              {item.icon}{item.label}
+            </button>
+          ))}
+        </div>
+      </nav>
+    </>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+</body>
+</html>

@@ -38,7 +38,7 @@ function setSyncGistId(id) { localStorage.setItem(SYNC_GIST_KEY, id); }
 function getLastSyncTime() { return localStorage.getItem(SYNC_LAST_KEY) || ''; }
 function setLastSyncTime() { localStorage.setItem(SYNC_LAST_KEY, new Date().toISOString()); }
 
-let _syncSaveCount = 0;
+let _syncTimer = null;
 
 function _get(key) {
   try { return JSON.parse(localStorage.getItem(key)) || []; }
@@ -46,12 +46,65 @@ function _get(key) {
 }
 function _set(key, data) {
   localStorage.setItem(key, JSON.stringify(data));
-  // 5回保存ごとにGist自動同期
-  _syncSaveCount++;
-  if (_syncSaveCount >= 5 && getSyncToken()) {
-    _syncSaveCount = 0;
-    syncToGist(() => {});
+  // 毎回保存時にGist同期（1秒デバウンス：連続保存をまとめる）
+  if (getSyncToken()) {
+    if (_syncTimer) clearTimeout(_syncTimer);
+    _syncTimer = setTimeout(() => {
+      _syncTimer = null;
+      updateSyncBar('syncing');
+      syncToGist((err) => {
+        updateSyncBar(err ? 'error' : 'ok');
+      });
+    }, 1000);
   }
+}
+
+// ── 同期バー表示制御 ──
+function updateSyncBar(state) {
+  const bar = document.getElementById('syncBar');
+  if (!bar) return;
+  const token = getSyncToken();
+  if (!token) { bar.style.display = 'none'; return; }
+  bar.style.display = 'flex';
+  const dot = bar.querySelector('.sync-dot-icon');
+  const text = bar.querySelector('.sync-text');
+  const icon = bar.querySelector('.sync-refresh-icon');
+  if (state === 'syncing') {
+    bar.className = 'sync-bar syncing';
+    if (dot) dot.style.background = 'var(--blue)';
+    if (text) text.textContent = '同期中...';
+    if (icon) icon.style.animation = 'spin 1s linear infinite';
+  } else if (state === 'error') {
+    bar.className = 'sync-bar error';
+    if (dot) dot.style.background = 'var(--red)';
+    if (text) text.textContent = '同期エラー';
+    if (icon) icon.style.animation = '';
+    setTimeout(() => updateSyncBar('ok'), 3000);
+  } else {
+    bar.className = 'sync-bar';
+    if (dot) dot.style.background = 'var(--accent)';
+    const last = getLastSyncTime();
+    if (last) {
+      const d = new Date(last);
+      const mm = String(d.getMonth()+1).padStart(2,'0');
+      const dd = String(d.getDate()).padStart(2,'0');
+      const hh = String(d.getHours()).padStart(2,'0');
+      const mi = String(d.getMinutes()).padStart(2,'0');
+      if (text) text.textContent = '同期済み（' + mm + '/' + dd + ' ' + hh + ':' + mi + '）';
+    } else {
+      if (text) text.textContent = '未同期';
+    }
+    if (icon) icon.style.animation = '';
+  }
+}
+
+function onSyncBarTap() {
+  const token = getSyncToken();
+  if (!token) return;
+  updateSyncBar('syncing');
+  syncToGist((err) => {
+    updateSyncBar(err ? 'error' : 'ok');
+  });
 }
 
 // ── Gist同期関数 ──
@@ -2066,9 +2119,11 @@ function SettingsPage() {
   const handleSync = () => {
     setSyncing(true);
     setStatus('同期中...');
+    updateSyncBar('syncing');
     syncToGist((err, msg) => {
       setSyncing(false);
       setStatus('');
+      updateSyncBar(err ? 'error' : 'ok');
       if (err) toast.show('同期エラー: ' + err, 'error');
       else toast.show('同期完了');
     });
@@ -2113,7 +2168,7 @@ function SettingsPage() {
             {lastSync && (
               <p style={{fontSize:'0.85rem',color:'var(--dim)',margin:'0 0 12px'}}>最終同期: {formatTime(lastSync)}</p>
             )}
-            <p style={{fontSize:'0.8rem',color:'var(--dim)',margin:'0 0 16px'}}>5回保存ごとに自動同期 / 起動時にも自動取得</p>
+            <p style={{fontSize:'0.8rem',color:'var(--dim)',margin:'0 0 16px'}}>保存ごとに自動同期 / 起動時にも自動取得</p>
             <div style={{display:'flex',gap:10,flexWrap:'wrap'}}>
               <button className="btn-action" onClick={handleSync} disabled={syncing}
                 style={{background:'var(--accent)',color:'#fff',border:'none',padding:'10px 20px',borderRadius:8,fontWeight:600,fontSize:'0.9rem'}}>
@@ -2176,6 +2231,24 @@ const Icons = {
   settings: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg>,
 };
 
+function SyncBar() {
+  useEffect(() => {
+    updateSyncBar('ok');
+    const interval = setInterval(() => updateSyncBar('ok'), 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  if (!getSyncToken()) return null;
+
+  return (
+    <div id="syncBar" className="sync-bar" onClick={onSyncBarTap}>
+      <span className="sync-dot-icon"></span>
+      <span className="sync-text"></span>
+      <span className="sync-refresh-icon">&#x21bb;</span>
+    </div>
+  );
+}
+
 function App() {
   const [page, setPage] = useState('home');
   const [logTab, setLogTab] = useState(null);
@@ -2211,6 +2284,7 @@ function App() {
 
   return (
     <>
+      <SyncBar key={page} />
       {renderPage()}
       <nav className="nav-bar">
         <div className="nav-bar-inner">

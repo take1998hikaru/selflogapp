@@ -23,6 +23,7 @@ const KEYS = {
   weather: 'selfcare_weather',
   streak: 'selfcare_streak',
   schedule: 'selfcare_schedule',
+  murmurs: 'selfcare_murmurs',
 };
 
 // ── Gist同期設定 ──
@@ -114,6 +115,7 @@ function _getAllLocalData() {
     diary: _get(KEYS.diary),
     todos: _get(KEYS.todos),
     weather: _get(KEYS.weather),
+    murmurs: _get(KEYS.murmurs),
     streak: (() => { try { return JSON.parse(localStorage.getItem(KEYS.streak)) || {}; } catch { return {}; } })(),
   };
 }
@@ -143,16 +145,25 @@ function _mergeData(local, remote) {
     else if ((r.createdAt || '') > (mergedTodos[idx].createdAt || '')) mergedTodos[idx] = r;
   });
 
+  // Murmurs: merge by id, take newer
+  const mergedMurmurs = [...(local.murmurs || [])];
+  (remote.murmurs || []).forEach(r => {
+    const idx = mergedMurmurs.findIndex(m => m.id === r.id);
+    if (idx < 0) mergedMurmurs.push(r);
+    else if ((r.createdAt || '') > (mergedMurmurs[idx].createdAt || '')) mergedMurmurs[idx] = r;
+  });
+
   // Streak: take higher count
   const mergedStreak = (local.streak?.count || 0) >= (remote.streak?.count || 0) ? (local.streak || {}) : (remote.streak || {});
 
-  return { logs: mergedLogs, diary: mergedDiary, todos: mergedTodos, weather: local.weather || [], streak: mergedStreak };
+  return { logs: mergedLogs, diary: mergedDiary, todos: mergedTodos, murmurs: mergedMurmurs, weather: local.weather || [], streak: mergedStreak };
 }
 
 function _applyData(data) {
   localStorage.setItem(KEYS.logs, JSON.stringify(data.logs || []));
   localStorage.setItem(KEYS.diary, JSON.stringify(data.diary || []));
   localStorage.setItem(KEYS.todos, JSON.stringify(data.todos || []));
+  localStorage.setItem(KEYS.murmurs, JSON.stringify(data.murmurs || []));
   if (data.streak) localStorage.setItem(KEYS.streak, JSON.stringify(data.streak));
 }
 
@@ -358,10 +369,33 @@ const DB = {
     return streak;
   },
 
+  // ── Murmurs (つぶやき) ──
+  getMurmurs() { return _get(KEYS.murmurs); },
+  getMurmursByDate(date) {
+    return _get(KEYS.murmurs).filter(m => (m.createdAt || '').startsWith(date));
+  },
+  saveMurmur(entry) {
+    const murmurs = _get(KEYS.murmurs);
+    if (!entry.id) {
+      entry.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+      entry.createdAt = new Date().toISOString();
+    }
+    murmurs.unshift(entry);
+    _set(KEYS.murmurs, murmurs);
+    return entry;
+  },
+  deleteMurmur(id) { _set(KEYS.murmurs, _get(KEYS.murmurs).filter(m => m.id !== id)); },
+  getAllMurmurTags() {
+    const tags = new Set();
+    _get(KEYS.murmurs).forEach(m => (m.tags || []).forEach(t => tags.add(t)));
+    return [...tags].sort();
+  },
+
   getAllDates() {
     const dates = new Set();
     _get(KEYS.logs).forEach(l => dates.add(l.date));
     _get(KEYS.diary).forEach(d => dates.add(d.date));
+    _get(KEYS.murmurs).forEach(m => { const d = (m.createdAt||'').slice(0,10); if(d) dates.add(d); });
     return [...dates].sort().reverse();
   },
 
@@ -417,6 +451,15 @@ const DB = {
     lines.push(row('日付','内容'));
     diaries.sort((a,b) => a.date.localeCompare(b.date)).forEach(d => {
       lines.push(row(d.date, d.content));
+    });
+
+    lines.push('');
+    // つぶやき
+    const murmurs = _get(KEYS.murmurs);
+    lines.push('## つぶやき');
+    lines.push(row('日時','内容','気分','タグ'));
+    murmurs.sort((a,b) => (a.createdAt||'').localeCompare(b.createdAt||'')).forEach(m => {
+      lines.push(row(m.createdAt, m.text, m.mood, (m.tags||[]).join(' ')));
     });
 
     const csv = '\uFEFF' + lines.join('\r\n'); // BOM付きUTF-8
@@ -1867,7 +1910,8 @@ function HistoryPage() {
   const diary = DB.getDiaryByDate(date);
   const weather = DB.getWeatherByDate(date);
   const todos = DB.getTodos().filter(t => t.dueDate === date);
-  const hasData = mLog || nLog || diary || weather || todos.length > 0;
+  const dayMurmurs = DB.getMurmursByDate(date);
+  const hasData = mLog || nLog || diary || weather || todos.length > 0 || dayMurmurs.length > 0;
 
   const generateAIReport = () => {
     const logs = JSON.parse(localStorage.getItem('selfcare_logs') || '[]');
@@ -2082,9 +2126,224 @@ function HistoryPage() {
         </div>
       )}
 
+      {dayMurmurs.length > 0 && (
+        <div className="card">
+          <div className="card-title">💬 MURMURS <span className="accent">{dayMurmurs.length}</span></div>
+          {dayMurmurs.map(m => (
+            <div key={m.id} className="history-entry" style={{display:'flex',gap:8,alignItems:'flex-start'}}>
+              <span style={{color:'var(--dim)',fontSize:'0.7rem',flexShrink:0,marginTop:2}}>
+                {new Date(m.createdAt).toLocaleTimeString('ja-JP',{hour:'2-digit',minute:'2-digit'})}
+              </span>
+              <div style={{flex:1}}>
+                {m.mood && <span style={{marginRight:4}}>{m.mood}</span>}
+                <span>{m.text}</span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
       {!hasData && (
         <div className="card" style={{textAlign:'center',padding:30,color:'var(--dim)',marginTop:12}}>この日のデータはありません</div>
       )}
+    </div>
+  );
+}
+
+// ═════════════════════════════
+//  Murmur Page (つぶやき)
+// ═════════════════════════════
+const MURMUR_MAX = 140;
+const MURMUR_MOODS = ['😊','😐','😢','😤','🔥','💤','🎉','💡'];
+const MURMUR_QUICK_TAGS = [
+  { tag: '体調', icon: '💊' },
+  { tag: '気分', icon: '🫧' },
+  { tag: '学び', icon: '📖' },
+  { tag: '達成', icon: '✨' },
+  { tag: '雑記', icon: '📝' },
+];
+
+function MurmurPage() {
+  const [text, setText] = useState('');
+  const [mood, setMood] = useState('');
+  const [selectedTags, setSelectedTags] = useState([]);
+  const [murmurs, setMurmurs] = useState(DB.getMurmurs());
+  const [filterTag, setFilterTag] = useState('');
+  const [confirmId, setConfirmId] = useState(null);
+  const [toastEl, showToast] = useToast();
+  const allTags = DB.getAllMurmurTags();
+
+  function reload() { setMurmurs(DB.getMurmurs()); }
+
+  function toggleTag(tag) {
+    setSelectedTags(prev =>
+      prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]
+    );
+  }
+
+  function post() {
+    const trimmed = text.trim();
+    if (!trimmed && selectedTags.length === 0) return;
+    // テキスト内のハッシュタグ抽出 + クイックタグをマージ
+    const inlineTags = [];
+    (trimmed || '').replace(/#([\w\u3000-\u9fff\uf900-\ufaff]+)/g, (_, t) => { inlineTags.push(t); });
+    const tags = [...new Set([...selectedTags, ...inlineTags])];
+    DB.saveMurmur({ text: trimmed, mood, tags });
+    setText('');
+    setMood('');
+    setSelectedTags([]);
+    reload();
+    showToast('💬 つぶやきました');
+  }
+
+  function handleDelete(id) {
+    DB.deleteMurmur(id);
+    setConfirmId(null);
+    reload();
+    showToast('🗑 削除しました');
+  }
+
+  function handleKeyDown(e) {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      post();
+    }
+  }
+
+  const canPost = text.trim() || selectedTags.length > 0;
+
+  // フィルタリング
+  const filtered = filterTag
+    ? murmurs.filter(m => (m.tags || []).includes(filterTag))
+    : murmurs;
+
+  // 日付グルーピング
+  const grouped = {};
+  filtered.forEach(m => {
+    const d = (m.createdAt || '').slice(0, 10);
+    if (!grouped[d]) grouped[d] = [];
+    grouped[d].push(m);
+  });
+  const sortedDates = Object.keys(grouped).sort().reverse();
+
+  function dateLabel(dateStr) {
+    const today = DB.today();
+    const yesterday = DB.shiftDate(today, -1);
+    if (dateStr === today) return '今日';
+    if (dateStr === yesterday) return '昨日';
+    return DB.formatDate(dateStr);
+  }
+
+  function timeLabel(iso) {
+    const d = new Date(iso);
+    return DB._pad(d.getHours()) + ':' + DB._pad(d.getMinutes());
+  }
+
+  // タグをテキスト本文から除いた表示用テキストを生成
+  function displayText(m) {
+    const cleaned = (m.text || '').replace(/#[\w\u3000-\u9fff\uf900-\ufaff]+/g, '').trim();
+    return cleaned;
+  }
+
+  return (
+    <div className="page">
+      <Header title="つぶやき" subtitle="気軽にひとこと" />
+      {toastEl}
+
+      {/* 投稿フォーム */}
+      <div className="card murmur-compose">
+        <textarea
+          className="form-textarea murmur-input"
+          placeholder="一言でOK。「眠い」でも立派な記録"
+          value={text}
+          onChange={e => setText(e.target.value.slice(0, MURMUR_MAX))}
+          onKeyDown={handleKeyDown}
+          rows={2}
+        />
+        <div className="murmur-compose-bottom">
+          <div className="murmur-compose-row">
+            <div className="murmur-mood-row">
+              {MURMUR_MOODS.map(m => (
+                <button key={m} className={`mood-btn murmur-mood-btn ${mood===m?'selected':''}`}
+                  onClick={() => setMood(mood===m?'':m)}>{m}</button>
+              ))}
+            </div>
+            <div className="murmur-count-wrap">
+              <span className={`murmur-count ${text.length >= MURMUR_MAX ? 'over' : ''}`}>
+                {text.length}/{MURMUR_MAX}
+              </span>
+            </div>
+          </div>
+          <div className="murmur-compose-row">
+            <div className="murmur-quick-tags">
+              {MURMUR_QUICK_TAGS.map(({tag, icon}) => (
+                <button key={tag} className={`murmur-quick-tag ${selectedTags.includes(tag)?'active':''}`}
+                  onClick={() => toggleTag(tag)}>{icon} #{tag}</button>
+              ))}
+            </div>
+            <button className="btn-primary murmur-post-btn" disabled={!canPost} onClick={post}>
+              投稿
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* タグフィルター */}
+      {allTags.length > 0 && (
+        <div className="murmur-tag-filter">
+          <button className={`todo-filter-btn ${!filterTag?'active':''}`} onClick={() => setFilterTag('')}>すべて</button>
+          {allTags.map(tag => (
+            <button key={tag} className={`todo-filter-btn ${filterTag===tag?'active':''}`}
+              onClick={() => setFilterTag(filterTag===tag?'':tag)}>#{tag}</button>
+          ))}
+        </div>
+      )}
+
+      {/* タイムライン */}
+      {sortedDates.length === 0 && (
+        <div className="murmur-empty">
+          <div className="murmur-empty-icon">💬</div>
+          <div className="murmur-empty-text">まだつぶやきがありません</div>
+          <div className="murmur-empty-hint">上のフォームから気軽にひとこと投稿しよう</div>
+        </div>
+      )}
+      {sortedDates.map(date => (
+        <div key={date}>
+          <div className="murmur-date-header">
+            <span className="murmur-date-line" />
+            <span className="murmur-date-label">{dateLabel(date)}</span>
+            <span className="murmur-date-line" />
+          </div>
+          {grouped[date].map(m => {
+            const cleanText = displayText(m);
+            return (
+            <div key={m.id} className="murmur-item">
+              <div className="murmur-item-header">
+                <span className="murmur-item-time">{timeLabel(m.createdAt)}</span>
+                {m.mood && <span className="murmur-item-mood">{m.mood}</span>}
+                <span style={{flex:1}} />
+                {confirmId === m.id ? (
+                  <span className="murmur-confirm">
+                    <button className="murmur-confirm-yes" onClick={() => handleDelete(m.id)}>削除</button>
+                    <button className="murmur-confirm-no" onClick={() => setConfirmId(null)}>戻す</button>
+                  </span>
+                ) : (
+                  <button className="murmur-delete" onClick={() => setConfirmId(m.id)} title="削除">×</button>
+                )}
+              </div>
+              {cleanText && <div className="murmur-item-text">{cleanText}</div>}
+              {(m.tags || []).length > 0 && (
+                <div className="murmur-item-tags">
+                  {m.tags.map(t => (
+                    <span key={t} className="murmur-tag" onClick={() => setFilterTag(t)}>#{t}</span>
+                  ))}
+                </div>
+              )}
+            </div>
+            );
+          })}
+        </div>
+      ))}
     </div>
   );
 }
@@ -2227,6 +2486,7 @@ const Icons = {
   home: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1m-2 0h2"/></svg>,
   edit: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>,
   check: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4"/></svg>,
+  chat: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>,
   clock: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>,
   settings: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.066 2.573c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.573 1.066c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.066-2.573c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/><circle cx="12" cy="12" r="3"/></svg>,
 };
@@ -2276,6 +2536,7 @@ function App() {
       case 'home':     return <Home navigate={navigate}/>;
       case 'log':      return <LogForm initialTab={logTab} initialDate={logDate} key={`log-${logTab||'auto'}-${logDate||''}`}/>;
       case 'todo':     return <TodoPage/>;
+      case 'murmur':   return <MurmurPage/>;
       case 'history':  return <HistoryPage/>;
       case 'settings': return <SettingsPage/>;
       default:         return <Home navigate={navigate}/>;
@@ -2291,6 +2552,7 @@ function App() {
           {[
             {key:'home',icon:Icons.home,label:'ホーム'},
             {key:'log',icon:Icons.edit,label:'ログ'},
+            {key:'murmur',icon:Icons.chat,label:'つぶやき'},
             {key:'todo',icon:Icons.check,label:'ToDo'},
             {key:'history',icon:Icons.clock,label:'履歴'},
             {key:'settings',icon:Icons.settings,label:'設定'},

@@ -83,10 +83,10 @@ body[data-season="winter"] {
 }
 .nav-item {
   display: flex; flex-direction: column; align-items: center;
-  gap: 2px; padding: 6px 8px;
+  gap: 2px; padding: 6px 4px;
   border: none; background: none; color: var(--dim);
-  font-size: 0.7rem; font-family: inherit; cursor: pointer;
-  transition: color 0.2s;
+  font-size: 0.62rem; font-family: inherit; cursor: pointer;
+  transition: color 0.2s; min-width: 0;
 }
 .nav-item.active { color: var(--accent); }
 .nav-item svg { width: 22px; height: 22px; }
@@ -782,6 +782,157 @@ input[type="range"]::-webkit-slider-thumb {
 }
 .today-msg-cta {
   font-size: 0.78rem; color: var(--accent); font-weight: 600;
+}
+
+/* ── Murmur (つぶやき) ── */
+.murmur-compose {
+  padding: 14px;
+}
+.murmur-input {
+  min-height: 50px; max-height: 120px;
+  resize: none; margin-bottom: 10px;
+  font-size: 0.88rem;
+}
+.murmur-compose-bottom {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.murmur-compose-row {
+  display: flex; align-items: center; gap: 8px;
+}
+.murmur-mood-row {
+  display: flex; gap: 4px; flex-wrap: wrap; flex: 1;
+}
+.murmur-mood-btn {
+  width: 32px; height: 32px; font-size: 1rem;
+  border-radius: 8px;
+}
+.murmur-count-wrap {
+  flex-shrink: 0;
+}
+.murmur-quick-tags {
+  display: flex; gap: 5px; flex-wrap: wrap; flex: 1;
+}
+.murmur-quick-tag {
+  padding: 5px 10px;
+  background: var(--card2); border: 1px solid var(--border);
+  border-radius: 16px; color: var(--dim);
+  font-family: inherit; font-size: 0.68rem;
+  cursor: pointer; transition: all 0.15s;
+}
+.murmur-quick-tag:hover {
+  border-color: rgba(74,158,255,0.4); color: var(--blue);
+}
+.murmur-quick-tag.active {
+  border-color: var(--blue); color: var(--blue);
+  background: rgba(74,158,255,0.12);
+  font-weight: 600;
+}
+
+.murmur-count {
+  font-size: 0.68rem; color: var(--dim);
+}
+.murmur-count.over { color: var(--red); font-weight: 600; }
+.murmur-post-btn {
+  width: auto; padding: 8px 20px;
+  font-size: 0.8rem; margin: 0; flex-shrink: 0;
+}
+
+.murmur-tag-filter {
+  display: flex; gap: 6px; margin-bottom: 14px;
+  flex-wrap: wrap;
+}
+
+/* 空状態 */
+.murmur-empty {
+  text-align: center; padding: 40px 20px; margin-top: 12px;
+}
+.murmur-empty-icon { font-size: 2.5rem; margin-bottom: 12px; opacity: 0.4; }
+.murmur-empty-text { color: var(--dim); font-size: 0.9rem; font-weight: 500; }
+.murmur-empty-hint { color: var(--dim); font-size: 0.72rem; margin-top: 6px; opacity: 0.6; }
+
+/* 日付ヘッダー */
+.murmur-date-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 14px 0 8px; margin-top: 2px;
+}
+.murmur-date-line {
+  flex: 1; height: 1px;
+  background: var(--border);
+}
+.murmur-date-label {
+  font-size: 0.72rem; color: var(--accent);
+  font-weight: 600; letter-spacing: 0.5px;
+  flex-shrink: 0;
+}
+
+/* タイムラインアイテム */
+.murmur-item {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  transition: border-color 0.15s;
+}
+.murmur-item:hover {
+  border-color: rgba(0,200,150,0.2);
+}
+
+.murmur-item-header {
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 4px;
+}
+.murmur-item-mood {
+  font-size: 0.9rem;
+}
+.murmur-item-time {
+  font-size: 0.65rem; color: var(--dim);
+  font-variant-numeric: tabular-nums;
+}
+.murmur-delete {
+  background: none; border: none; color: var(--dim);
+  cursor: pointer; font-size: 0.8rem; padding: 2px 6px;
+  border-radius: 4px; opacity: 0;
+  transition: all 0.15s;
+}
+.murmur-item:hover .murmur-delete { opacity: 0.6; }
+.murmur-delete:hover { opacity: 1 !important; color: var(--red); background: rgba(224,85,85,0.1); }
+
+/* 削除確認 */
+.murmur-confirm {
+  display: flex; gap: 4px;
+}
+.murmur-confirm-yes {
+  padding: 2px 10px; border: none; border-radius: 6px;
+  background: var(--red); color: #fff;
+  font-family: inherit; font-size: 0.65rem; font-weight: 600;
+  cursor: pointer;
+}
+.murmur-confirm-no {
+  padding: 2px 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: none; color: var(--dim);
+  font-family: inherit; font-size: 0.65rem;
+  cursor: pointer;
+}
+
+.murmur-item-text {
+  font-size: 0.88rem; line-height: 1.6;
+  white-space: pre-wrap; word-break: break-word;
+}
+
+.murmur-item-tags {
+  display: flex; gap: 5px; margin-top: 8px; flex-wrap: wrap;
+}
+.murmur-tag {
+  font-size: 0.62rem; padding: 2px 8px;
+  border-radius: 10px;
+  background: rgba(74,158,255,0.08);
+  border: 1px solid rgba(74,158,255,0.2);
+  color: var(--blue); cursor: pointer;
+  transition: background 0.15s;
+}
+.murmur-tag:hover {
+  background: rgba(74,158,255,0.18);
 }
 
 /* ── Responsive ── */

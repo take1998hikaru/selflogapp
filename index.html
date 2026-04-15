@@ -45,8 +45,19 @@ function _get(key) {
   try { return JSON.parse(localStorage.getItem(key)) || []; }
   catch { return []; }
 }
+let _serverTimer = null;
 function _set(key, data) {
   localStorage.setItem(key, JSON.stringify(data));
+  // サーバーにも保存（1秒デバウンス）
+  if (_serverTimer) clearTimeout(_serverTimer);
+  _serverTimer = setTimeout(() => {
+    _serverTimer = null;
+    fetch('/api/save', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ type: key, data }),
+    }).catch(() => {});  // オフライン時は無視
+  }, 1000);
   // 毎回保存時にGist同期（1秒デバウンス：連続保存をまとめる）
   if (getSyncToken()) {
     if (_syncTimer) clearTimeout(_syncTimer);

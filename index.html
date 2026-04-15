@@ -156,12 +156,13 @@ function _mergeData(local, remote) {
     else if ((r.createdAt || '') > (mergedTodos[idx].createdAt || '')) mergedTodos[idx] = r;
   });
 
-  // Murmurs: merge by id, take newer
+  // Murmurs: merge by id, take newer (updatedAt > deletedAt > createdAt)
+  function _murmurTs(m) { return m.deletedAt || m.updatedAt || m.createdAt || ''; }
   const mergedMurmurs = [...(local.murmurs || [])];
   (remote.murmurs || []).forEach(r => {
     const idx = mergedMurmurs.findIndex(m => m.id === r.id);
     if (idx < 0) mergedMurmurs.push(r);
-    else if ((r.createdAt || '') > (mergedMurmurs[idx].createdAt || '')) mergedMurmurs[idx] = r;
+    else if (_murmurTs(r) > _murmurTs(mergedMurmurs[idx])) mergedMurmurs[idx] = r;
   });
 
   // Streak: take higher count
@@ -381,26 +382,46 @@ const DB = {
   },
 
   // ── Murmurs (つぶやき) ──
-  getMurmurs() { return _get(KEYS.murmurs); },
+  _localNow() {
+    const now = new Date();
+    return now.getFullYear() + '-' + DB._pad(now.getMonth()+1) + '-' + DB._pad(now.getDate())
+      + 'T' + DB._pad(now.getHours()) + ':' + DB._pad(now.getMinutes()) + ':' + DB._pad(now.getSeconds());
+  },
+  getMurmurs() { return _get(KEYS.murmurs).filter(m => !m.deleted); },
   getMurmursByDate(date) {
-    return _get(KEYS.murmurs).filter(m => (m.createdAt || '').startsWith(date));
+    return _get(KEYS.murmurs).filter(m => !m.deleted && (m.createdAt || '').startsWith(date));
   },
   saveMurmur(entry) {
     const murmurs = _get(KEYS.murmurs);
     if (!entry.id) {
       entry.id = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-      const now = new Date();
-      entry.createdAt = now.getFullYear() + '-' + DB._pad(now.getMonth()+1) + '-' + DB._pad(now.getDate())
-        + 'T' + DB._pad(now.getHours()) + ':' + DB._pad(now.getMinutes()) + ':' + DB._pad(now.getSeconds());
+      entry.createdAt = DB._localNow();
     }
     murmurs.unshift(entry);
     _set(KEYS.murmurs, murmurs);
     return entry;
   },
-  deleteMurmur(id) { _set(KEYS.murmurs, _get(KEYS.murmurs).filter(m => m.id !== id)); },
+  updateMurmur(id, updates) {
+    const murmurs = _get(KEYS.murmurs);
+    const idx = murmurs.findIndex(m => m.id === id);
+    if (idx >= 0) {
+      murmurs[idx] = { ...murmurs[idx], ...updates, updatedAt: DB._localNow() };
+      _set(KEYS.murmurs, murmurs);
+    }
+  },
+  deleteMurmur(id) {
+    // ソフトデリート: deleted フラグを立てる（同期時に復活しない）
+    const murmurs = _get(KEYS.murmurs);
+    const idx = murmurs.findIndex(m => m.id === id);
+    if (idx >= 0) {
+      murmurs[idx].deleted = true;
+      murmurs[idx].deletedAt = DB._localNow();
+      _set(KEYS.murmurs, murmurs);
+    }
+  },
   getAllMurmurTags() {
     const tags = new Set();
-    _get(KEYS.murmurs).forEach(m => (m.tags || []).forEach(t => tags.add(t)));
+    _get(KEYS.murmurs).filter(m => !m.deleted).forEach(m => (m.tags || []).forEach(t => tags.add(t)));
     return [...tags].sort();
   },
 
@@ -471,7 +492,7 @@ const DB = {
     const murmurs = _get(KEYS.murmurs);
     lines.push('## つぶやき');
     lines.push(row('日時','内容','気分','タグ'));
-    murmurs.sort((a,b) => (a.createdAt||'').localeCompare(b.createdAt||'')).forEach(m => {
+    murmurs.filter(m => !m.deleted).sort((a,b) => (a.createdAt||'').localeCompare(b.createdAt||'')).forEach(m => {
       lines.push(row(m.createdAt, m.text, m.mood, (m.tags||[]).join(' ')));
     });
 
@@ -2168,13 +2189,23 @@ function HistoryPage() {
 // ═════════════════════════════
 const MURMUR_MAX = 140;
 const MURMUR_MOODS = ['😊','😐','😢','😤','🔥','💤','🎉','💡'];
-const MURMUR_QUICK_TAGS = [
+const MURMUR_DEFAULT_TAGS = [
   { tag: '体調', icon: '💊' },
   { tag: '気分', icon: '🫧' },
   { tag: '学び', icon: '📖' },
   { tag: '達成', icon: '✨' },
   { tag: '雑記', icon: '📝' },
+  { tag: '仕事', icon: '💼' },
+  { tag: '世界遺産', icon: '🏛' },
 ];
+
+function getCustomTags() {
+  try { return JSON.parse(localStorage.getItem('selfcare_custom_tags')) || []; }
+  catch { return []; }
+}
+function saveCustomTags(tags) {
+  localStorage.setItem('selfcare_custom_tags', JSON.stringify(tags));
+}
 
 function MurmurPage() {
   const [text, setText] = useState('');
@@ -2183,8 +2214,17 @@ function MurmurPage() {
   const [murmurs, setMurmurs] = useState(DB.getMurmurs());
   const [filterTag, setFilterTag] = useState('');
   const [confirmId, setConfirmId] = useState(null);
+  const [editId, setEditId] = useState(null);
+  const [editText, setEditText] = useState('');
+  const [editMood, setEditMood] = useState('');
+  const [editTags, setEditTags] = useState([]);
+  const [newTagInput, setNewTagInput] = useState('');
+  const [showTagForm, setShowTagForm] = useState(false);
+  const [customTags, setCustomTags] = useState(getCustomTags());
   const [toastEl, showToast] = useToast();
   const allTags = DB.getAllMurmurTags();
+
+  const quickTags = [...MURMUR_DEFAULT_TAGS, ...customTags.map(t => ({ tag: t, icon: '🏷' }))];
 
   function reload() { setMurmurs(DB.getMurmurs()); }
 
@@ -2194,10 +2234,28 @@ function MurmurPage() {
     );
   }
 
+  function addCustomTag() {
+    const t = newTagInput.trim().replace(/^#/, '');
+    if (!t) return;
+    if (quickTags.some(qt => qt.tag === t)) { showToast('既に存在するタグです'); return; }
+    const updated = [...customTags, t];
+    setCustomTags(updated);
+    saveCustomTags(updated);
+    setNewTagInput('');
+    setShowTagForm(false);
+    showToast(`🏷 #${t} を追加しました`);
+  }
+
+  function removeCustomTag(tag) {
+    const updated = customTags.filter(t => t !== tag);
+    setCustomTags(updated);
+    saveCustomTags(updated);
+    showToast(`#${tag} を削除しました`);
+  }
+
   function post() {
     const trimmed = text.trim();
     if (!trimmed && selectedTags.length === 0) return;
-    // テキスト内のハッシュタグ抽出 + クイックタグをマージ
     const inlineTags = [];
     (trimmed || '').replace(/#([\w\u3000-\u9fff\uf900-\ufaff]+)/g, (_, t) => { inlineTags.push(t); });
     const tags = [...new Set([...selectedTags, ...inlineTags])];
@@ -2216,6 +2274,38 @@ function MurmurPage() {
     showToast('🗑 削除しました');
   }
 
+  function startEdit(m) {
+    setEditId(m.id);
+    setEditText(m.text || '');
+    setEditMood(m.mood || '');
+    setEditTags([...(m.tags || [])]);
+  }
+
+  function cancelEdit() {
+    setEditId(null);
+    setEditText('');
+    setEditMood('');
+    setEditTags([]);
+  }
+
+  function saveEdit() {
+    const trimmed = editText.trim();
+    if (!trimmed && editTags.length === 0) return;
+    const inlineTags = [];
+    (trimmed || '').replace(/#([\w\u3000-\u9fff\uf900-\ufaff]+)/g, (_, t) => { inlineTags.push(t); });
+    const tags = [...new Set([...editTags, ...inlineTags])];
+    DB.updateMurmur(editId, { text: trimmed, mood: editMood, tags });
+    cancelEdit();
+    reload();
+    showToast('✏️ 更新しました');
+  }
+
+  function toggleEditTag(tag) {
+    setEditTags(prev =>
+      prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]
+    );
+  }
+
   function handleKeyDown(e) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -2225,10 +2315,10 @@ function MurmurPage() {
 
   const canPost = text.trim() || selectedTags.length > 0;
 
-  // フィルタリング
+  // フィルタリング（削除済みは除外）
   const filtered = filterTag
-    ? murmurs.filter(m => (m.tags || []).includes(filterTag))
-    : murmurs;
+    ? murmurs.filter(m => !m.deleted && (m.tags || []).includes(filterTag))
+    : murmurs.filter(m => !m.deleted);
 
   // 日付グルーピング
   const grouped = {};
@@ -2248,11 +2338,12 @@ function MurmurPage() {
   }
 
   function timeLabel(iso) {
+    if (!iso) return '';
     const d = new Date(iso);
+    if (isNaN(d.getTime())) return '';
     return DB._pad(d.getHours()) + ':' + DB._pad(d.getMinutes());
   }
 
-  // タグをテキスト本文から除いた表示用テキストを生成
   function displayText(m) {
     const cleaned = (m.text || '').replace(/#[\w\u3000-\u9fff\uf900-\ufaff]+/g, '').trim();
     return cleaned;
@@ -2289,15 +2380,36 @@ function MurmurPage() {
           </div>
           <div className="murmur-compose-row">
             <div className="murmur-quick-tags">
-              {MURMUR_QUICK_TAGS.map(({tag, icon}) => (
+              {quickTags.map(({tag, icon}) => (
                 <button key={tag} className={`murmur-quick-tag ${selectedTags.includes(tag)?'active':''}`}
                   onClick={() => toggleTag(tag)}>{icon} #{tag}</button>
               ))}
+              <button className="murmur-quick-tag murmur-add-tag" onClick={() => setShowTagForm(!showTagForm)}>＋</button>
             </div>
             <button className="btn-primary murmur-post-btn" disabled={!canPost} onClick={post}>
               投稿
             </button>
           </div>
+          {showTagForm && (
+            <div className="murmur-tag-form">
+              <input className="form-input" placeholder="新しいタグ名"
+                value={newTagInput} onChange={e => setNewTagInput(e.target.value)}
+                onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addCustomTag(); } }}
+                style={{flex:1,fontSize:'0.8rem',padding:'6px 10px'}} />
+              <button className="btn-primary" onClick={addCustomTag}
+                style={{padding:'6px 14px',fontSize:'0.75rem',width:'auto',margin:0}}>追加</button>
+            </div>
+          )}
+          {showTagForm && customTags.length > 0 && (
+            <div className="murmur-custom-tags-list">
+              {customTags.map(t => (
+                <span key={t} className="murmur-custom-tag-item">
+                  🏷 #{t}
+                  <button onClick={() => removeCustomTag(t)} className="murmur-custom-tag-remove">×</button>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       </div>
 
@@ -2329,28 +2441,61 @@ function MurmurPage() {
           </div>
           {grouped[date].map(m => {
             const cleanText = displayText(m);
+            const isEditing = editId === m.id;
             return (
-            <div key={m.id} className="murmur-item">
-              <div className="murmur-item-header">
-                <span className="murmur-item-time">{timeLabel(m.createdAt)}</span>
-                {m.mood && <span className="murmur-item-mood">{m.mood}</span>}
-                <span style={{flex:1}} />
-                {confirmId === m.id ? (
-                  <span className="murmur-confirm">
-                    <button className="murmur-confirm-yes" onClick={() => handleDelete(m.id)}>削除</button>
-                    <button className="murmur-confirm-no" onClick={() => setConfirmId(null)}>戻す</button>
-                  </span>
-                ) : (
-                  <button className="murmur-delete" onClick={() => setConfirmId(m.id)} title="削除">×</button>
-                )}
-              </div>
-              {cleanText && <div className="murmur-item-text">{cleanText}</div>}
-              {(m.tags || []).length > 0 && (
-                <div className="murmur-item-tags">
-                  {m.tags.map(t => (
-                    <span key={t} className="murmur-tag" onClick={() => setFilterTag(t)}>#{t}</span>
-                  ))}
+            <div key={m.id} className={`murmur-item ${isEditing?'editing':''}`}>
+              {isEditing ? (
+                /* 編集モード */
+                <div className="murmur-edit-form">
+                  <textarea className="form-textarea murmur-input" value={editText}
+                    onChange={e => setEditText(e.target.value.slice(0, MURMUR_MAX))} rows={2} />
+                  <div className="murmur-mood-row" style={{marginTop:6}}>
+                    {MURMUR_MOODS.map(em => (
+                      <button key={em} className={`mood-btn murmur-mood-btn ${editMood===em?'selected':''}`}
+                        onClick={() => setEditMood(editMood===em?'':em)}>{em}</button>
+                    ))}
+                  </div>
+                  <div className="murmur-quick-tags" style={{marginTop:6}}>
+                    {quickTags.map(({tag, icon}) => (
+                      <button key={tag} className={`murmur-quick-tag ${editTags.includes(tag)?'active':''}`}
+                        onClick={() => toggleEditTag(tag)}>{icon} #{tag}</button>
+                    ))}
+                  </div>
+                  <div style={{display:'flex',gap:6,marginTop:8,justifyContent:'flex-end'}}>
+                    <button className="murmur-confirm-no" onClick={cancelEdit}>キャンセル</button>
+                    <button className="murmur-confirm-yes" onClick={saveEdit}
+                      style={{background:'var(--accent)'}}>保存</button>
+                  </div>
                 </div>
+              ) : (
+                /* 表示モード */
+                <>
+                  <div className="murmur-item-header">
+                    <span className="murmur-item-time">{timeLabel(m.createdAt)}</span>
+                    {m.mood && <span className="murmur-item-mood">{m.mood}</span>}
+                    {m.updatedAt && <span className="murmur-edited-badge">編集済</span>}
+                    <span style={{flex:1}} />
+                    {confirmId === m.id ? (
+                      <span className="murmur-confirm">
+                        <button className="murmur-confirm-yes" onClick={() => handleDelete(m.id)}>削除</button>
+                        <button className="murmur-confirm-no" onClick={() => setConfirmId(null)}>戻す</button>
+                      </span>
+                    ) : (
+                      <span className="murmur-actions-group">
+                        <button className="murmur-edit-btn" onClick={() => startEdit(m)} title="編集">✏️</button>
+                        <button className="murmur-delete" onClick={() => setConfirmId(m.id)} title="削除">×</button>
+                      </span>
+                    )}
+                  </div>
+                  {cleanText && <div className="murmur-item-text">{cleanText}</div>}
+                  {(m.tags || []).length > 0 && (
+                    <div className="murmur-item-tags">
+                      {m.tags.map(t => (
+                        <span key={t} className="murmur-tag" onClick={() => setFilterTag(t)}>#{t}</span>
+                      ))}
+                    </div>
+                  )}
+                </>
               )}
             </div>
             );

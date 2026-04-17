@@ -31,6 +31,7 @@ const SYNC_TOKEN_KEY = 'selfcare_sync_token';
 const SYNC_GIST_KEY = 'selfcare_sync_gist_id';
 const SYNC_LAST_KEY = 'selfcare_sync_last';
 const GIST_FILENAME = 'selfcare_log_data.json';
+const BRIEFING_GIST_FILENAME = 'selfcare_switchbot_briefing.json';
 
 function getSyncToken() { return localStorage.getItem(SYNC_TOKEN_KEY) || ''; }
 function setSyncToken(t) { localStorage.setItem(SYNC_TOKEN_KEY, t); }
@@ -38,6 +39,38 @@ function getSyncGistId() { return localStorage.getItem(SYNC_GIST_KEY) || ''; }
 function setSyncGistId(id) { localStorage.setItem(SYNC_GIST_KEY, id); }
 function getLastSyncTime() { return localStorage.getItem(SYNC_LAST_KEY) || ''; }
 function setLastSyncTime() { localStorage.setItem(SYNC_LAST_KEY, new Date().toISOString()); }
+
+// ── SwitchBot ブリーフィングを既存Gistにリレー ──
+function saveBriefingToGist(briefing) {
+  const token = getSyncToken();
+  const gistId = getSyncGistId();
+  if (!token || !gistId || !briefing) return Promise.resolve();
+  const payload = { ...briefing, _uploadedAt: new Date().toISOString() };
+  return fetch('https://api.github.com/gists/' + gistId, {
+    method: 'PATCH',
+    headers: { 'Authorization': 'token ' + token, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      files: { [BRIEFING_GIST_FILENAME]: { content: JSON.stringify(payload) } }
+    })
+  }).catch(() => {});
+}
+
+function loadBriefingFromGist() {
+  const token = getSyncToken();
+  const gistId = getSyncGistId();
+  if (!token || !gistId) return Promise.resolve(null);
+  return fetch('https://api.github.com/gists/' + gistId, {
+    headers: { 'Authorization': 'token ' + token }
+  })
+    .then(res => res.ok ? res.json() : null)
+    .then(data => {
+      if (!data) return null;
+      const file = data.files && data.files[BRIEFING_GIST_FILENAME];
+      if (!file || !file.content) return null;
+      try { return JSON.parse(file.content); } catch { return null; }
+    })
+    .catch(() => null);
+}
 
 let _syncTimer = null;
 
@@ -1109,17 +1142,35 @@ function Home({ navigate }) {
   const [toastEl, showToast] = useToast();
 
   const loadBriefing = useCallback(() => {
+    // まずローカル server.py を試す（PC）
     fetch('/api/switchbot/summary?date=' + DB.today())
       .then(r => r.ok ? r.json() : null)
-      .then(b => { if (b && !b.error) setBriefing(b); })
-      .catch(() => {});
+      .then(b => {
+        if (b && !b.error) {
+          setBriefing(b);
+          saveBriefingToGist(b); // 成功したら Gist にも中継
+        } else {
+          throw new Error('backend unavailable');
+        }
+      })
+      .catch(() => {
+        // フォールバック: Gist から最新ブリーフィングを読む（スマホ）
+        loadBriefingFromGist().then(b => { if (b) setBriefing(b); });
+      });
   }, []);
 
   const refreshBriefing = async () => {
     setBriefingLoading(true);
     try {
-      await fetch('/api/switchbot/refresh').catch(() => {});
-      loadBriefing();
+      const res = await fetch('/api/switchbot/refresh').catch(() => null);
+      if (res && res.ok) {
+        // PC: ローカルで取得できた → サマリ再読込 + Gist中継
+        loadBriefing();
+      } else {
+        // スマホ: Gist から最新を取り直す
+        const b = await loadBriefingFromGist();
+        if (b) setBriefing(b);
+      }
     } finally {
       setTimeout(() => setBriefingLoading(false), 800);
     }
@@ -1262,6 +1313,26 @@ function Home({ navigate }) {
               </button>
             </span>
           </div>
+
+          {briefing._uploadedAt && (() => {
+            const upAt = new Date(briefing._uploadedAt);
+            const diffMin = Math.floor((Date.now() - upAt.getTime()) / 60000);
+            const label = diffMin < 1 ? 'たった今'
+              : diffMin < 60 ? `${diffMin}分前`
+              : diffMin < 1440 ? `${Math.floor(diffMin/60)}時間前`
+              : `${Math.floor(diffMin/1440)}日前`;
+            const isStale = diffMin >= 360; // 6時間以上
+            return (
+              <div style={{
+                fontSize: '0.68rem',
+                color: isStale ? 'var(--orange)' : 'var(--dim)',
+                marginBottom: 6,
+              }}>
+                📡 PC最終同期: {label}
+                {isStale && ' — PC を起動すると最新データになります'}
+              </div>
+            );
+          })()}
 
           {briefing.morning && briefing.morning.sleepQuality ? (
             <div style={{ fontSize: '0.82rem', marginBottom: 8, color: 'var(--text)' }}>

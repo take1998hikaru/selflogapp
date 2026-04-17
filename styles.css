@@ -935,6 +935,57 @@ input[type="range"]::-webkit-slider-thumb {
   background: rgba(74,158,255,0.18);
 }
 
+/* タグ追加フォーム */
+.murmur-add-tag {
+  border-style: dashed !important; font-size: 0.8rem !important;
+  padding: 5px 10px !important;
+}
+.murmur-tag-form {
+  display: flex; gap: 6px; margin-top: 4px;
+}
+.murmur-custom-tags-list {
+  display: flex; gap: 5px; flex-wrap: wrap; margin-top: 6px;
+}
+.murmur-custom-tag-item {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 0.65rem; padding: 3px 8px;
+  background: var(--card2); border: 1px solid var(--border);
+  border-radius: 10px; color: var(--dim);
+}
+.murmur-custom-tag-remove {
+  background: none; border: none; color: var(--dim);
+  cursor: pointer; font-size: 0.75rem; padding: 0 2px;
+  line-height: 1;
+}
+.murmur-custom-tag-remove:hover { color: var(--red); }
+
+/* 編集・アクション */
+.murmur-actions-group {
+  display: flex; gap: 2px; align-items: center;
+}
+.murmur-edit-btn {
+  background: none; border: none; cursor: pointer;
+  font-size: 0.7rem; padding: 2px 4px; opacity: 0;
+  transition: opacity 0.15s;
+}
+.murmur-item:hover .murmur-edit-btn { opacity: 0.6; }
+.murmur-edit-btn:hover { opacity: 1 !important; }
+
+.murmur-item.editing {
+  border-color: var(--accent);
+  background: rgba(0,200,150,0.03);
+}
+.murmur-edit-form .murmur-input {
+  margin-bottom: 0;
+}
+
+.murmur-edited-badge {
+  font-size: 0.55rem; color: var(--dim);
+  background: var(--card2); border: 1px solid var(--border);
+  border-radius: 8px; padding: 1px 6px;
+  margin-left: 2px;
+}
+
 /* ── Responsive ── */
 @media (max-width: 420px) {
   body { font-size: 14px; }

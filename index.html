@@ -461,9 +461,9 @@ const DB = {
     lines.push('');
     // 夜ログ
     lines.push('## 夜ログ');
-    lines.push(row('日付','就寝予定','気分','運動','運動内容','明日の最優先タスク','感謝・よかったこと','振り返り'));
+    lines.push(row('日付','就寝予定','気分','体調','運動','運動内容','明日の最優先タスク','感謝・よかったこと','振り返り'));
     logs.filter(l => l.type === 'night').sort((a,b) => a.date.localeCompare(b.date)).forEach(l => {
-      lines.push(row(l.date, l.bedTime, l.mood,
+      lines.push(row(l.date, l.bedTime, l.mood, l.bodyCondition,
         l.exerciseDone === 'yes' ? 'やった' : l.exerciseDone === 'no' ? '休み' : '',
         l.exercise, l.tomorrowGoal, l.gratitude, l.reflection));
     });
@@ -1104,7 +1104,26 @@ function Home({ navigate }) {
   const [activityStats, setActivityStats] = useState({ totalDays: 0, streakDays: 0 });
   const [status, setStatus] = useState({});
   const [priorityItems, setPriorityItems] = useState([]);
+  const [briefing, setBriefing] = useState(null);
+  const [briefingLoading, setBriefingLoading] = useState(false);
   const [toastEl, showToast] = useToast();
+
+  const loadBriefing = useCallback(() => {
+    fetch('/api/switchbot/summary?date=' + DB.today())
+      .then(r => r.ok ? r.json() : null)
+      .then(b => { if (b && !b.error) setBriefing(b); })
+      .catch(() => {});
+  }, []);
+
+  const refreshBriefing = async () => {
+    setBriefingLoading(true);
+    try {
+      await fetch('/api/switchbot/refresh').catch(() => {});
+      loadBriefing();
+    } finally {
+      setTimeout(() => setBriefingLoading(false), 800);
+    }
+  };
 
   // チェック状態をlocalStorageで永続化（日付キーで翌日自動リセット）
   const CHECKED_KEY = 'selfcare_priority_checked';
@@ -1134,6 +1153,7 @@ function Home({ navigate }) {
   useEffect(() => {
     fetchWeatherForecast().then(f => { if (f) setForecast(f); });
     refresh();
+    loadBriefing();
     // 季節を設定
     const m = new Date().getMonth() + 1;
     const season = m >= 3 && m <= 5 ? 'spring' : m >= 6 && m <= 8 ? 'summer' : m >= 9 && m <= 11 ? 'autumn' : 'winter';
@@ -1215,6 +1235,104 @@ function Home({ navigate }) {
       }}>
         {motivMsg.text}
       </div>
+
+      {/* 朝のブリーフィング（SwitchBot） */}
+      {briefing && (briefing.devices?.寝室 || briefing.devices?.外 || Object.keys(briefing.latest || {}).length > 0) && (
+        <div className="card">
+          <div className="card-title" style={{ marginBottom: 8 }}>
+            <span>🛏️ 朝のブリーフィング</span>
+            <span style={{ display:'flex', alignItems:'center', gap: 8 }}>
+              {briefing.period?.bedTime && briefing.period?.wakeTime && (
+                <span style={{ fontSize: '0.7rem', color: 'var(--dim)', fontWeight: 500 }}>
+                  {briefing.period.bedTime} 〜 {briefing.period.wakeTime}
+                </span>
+              )}
+              <button
+                onClick={refreshBriefing}
+                disabled={briefingLoading}
+                title="温湿度を今すぐ取得"
+                style={{
+                  border: '1px solid var(--border)', background: 'var(--card2)',
+                  color: 'var(--dim)', borderRadius: 8, padding: '2px 8px',
+                  fontSize: '0.7rem', cursor: briefingLoading ? 'wait' : 'pointer',
+                  fontFamily: 'inherit',
+                }}
+              >
+                {briefingLoading ? '更新中…' : '↻ 更新'}
+              </button>
+            </span>
+          </div>
+
+          {briefing.morning && briefing.morning.sleepQuality ? (
+            <div style={{ fontSize: '0.82rem', marginBottom: 8, color: 'var(--text)' }}>
+              睡眠の質 {'⭐'.repeat(Math.floor(briefing.morning.sleepQuality))}{briefing.morning.sleepQuality % 1 !== 0 ? '✨' : ''}
+              <span style={{ color: 'var(--dim)' }}> ({briefing.morning.sleepQuality}/5)</span>
+              {briefing.morning.mood && <span style={{ marginLeft: 8 }}>{briefing.morning.mood}</span>}
+            </div>
+          ) : null}
+
+          {briefing.devices?.寝室 && (
+            <div style={{ fontSize: '0.8rem', marginBottom: 6, lineHeight: 1.5 }}>
+              <span style={{ color: 'var(--dim)' }}>🛏 寝室　</span>
+              <strong>{briefing.devices.寝室.first.temperature}°C → {briefing.devices.寝室.last.temperature}°C</strong>
+              <span style={{ color: 'var(--dim)', marginLeft: 6, fontSize: '0.72rem' }}>
+                (min {briefing.devices.寝室.temp.min}° / max {briefing.devices.寝室.temp.max}°)
+              </span>
+              <br/>
+              <span style={{ color: 'var(--dim)', marginLeft: 28 }}>
+                湿度 {briefing.devices.寝室.humidity.min}–{briefing.devices.寝室.humidity.max}%
+                （平均 {briefing.devices.寝室.humidity.avg}%）
+              </span>
+            </div>
+          )}
+
+          {briefing.devices?.外 && (
+            <div style={{ fontSize: '0.8rem', marginBottom: 6, lineHeight: 1.5 }}>
+              <span style={{ color: 'var(--dim)' }}>🌳 外　　</span>
+              {briefing.latest?.外 ? (
+                <>
+                  <strong>{briefing.latest.外.temperature}°C</strong>
+                  <span style={{ color: 'var(--dim)', fontSize: '0.72rem' }}>（現在）</span>
+                </>
+              ) : (
+                <strong>{briefing.devices.外.last.temperature}°C</strong>
+              )}
+              <span style={{ color: 'var(--dim)', marginLeft: 6, fontSize: '0.72rem' }}>
+                / 昨夜最低 {briefing.devices.外.temp.min}°C / 湿度 {briefing.devices.外.humidity.avg}%
+              </span>
+            </div>
+          )}
+
+          {/* 期間内データが無い場合は最新値のみ表示 */}
+          {!briefing.devices?.寝室 && !briefing.devices?.外 && briefing.latest && (
+            <div style={{ fontSize: '0.8rem', color: 'var(--dim)' }}>
+              {Object.entries(briefing.latest).map(([label, rec]) => (
+                <div key={label}>
+                  {label}: {rec.temperature}°C / 湿度 {rec.humidity}%
+                  <span style={{ fontSize: '0.68rem', marginLeft: 6 }}>
+                    ({rec.timestamp?.slice(11, 16)})
+                  </span>
+                </div>
+              ))}
+              <div style={{ marginTop: 4, fontSize: '0.7rem' }}>
+                ※ 睡眠期間のデータが蓄積されると、就寝〜起床の推移が表示されます
+              </div>
+            </div>
+          )}
+
+          {briefing.comment && (
+            <div style={{
+              marginTop: 8, padding: '6px 10px',
+              background: 'rgba(0,200,150,0.08)',
+              border: '1px solid rgba(0,200,150,0.2)',
+              borderRadius: 8,
+              fontSize: '0.75rem', color: 'var(--accent)',
+            }}>
+              {briefing.comment}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* 朝活ストリーク */}
       <div className="card">
@@ -1418,6 +1536,7 @@ function LogForm({ initialTab, initialDate }) {
     const n = DB.getLogByDate(date, 'night');
     setNight({
       bedTime: n?.bedTime||'', mood: n?.mood||'',
+      bodyCondition: n?.bodyCondition||3,
       exerciseDone: n?.exerciseDone||'',
       exercise: n?.exercise||'',
       tomorrowGoal: n?.tomorrowGoal||'',
@@ -1552,7 +1671,7 @@ function LogForm({ initialTab, initialDate }) {
                 <span className="form-label">体調</span>
                 <span className="slider-val">{morning.bodyCondition}/5</span>
               </div>
-              <input type="range" min="1" max="5" value={morning.bodyCondition} onChange={e=>mSet('bodyCondition',+e.target.value)}/>
+              <input type="range" min="1" max="5" step="0.1" value={morning.bodyCondition} onChange={e=>mSet('bodyCondition',Math.round(+e.target.value*10)/10)}/>
             </div>
 
             <div className="slider-group">
@@ -1560,7 +1679,7 @@ function LogForm({ initialTab, initialDate }) {
                 <span className="form-label">睡眠の質</span>
                 <span className="slider-val">{morning.sleepQuality}/5</span>
               </div>
-              <input type="range" min="1" max="5" value={morning.sleepQuality} onChange={e=>mSet('sleepQuality',+e.target.value)}/>
+              <input type="range" min="1" max="5" step="0.1" value={morning.sleepQuality} onChange={e=>mSet('sleepQuality',Math.round(+e.target.value*10)/10)}/>
             </div>
 
             <div className="form-group">
@@ -1603,6 +1722,14 @@ function LogForm({ initialTab, initialDate }) {
                   <button key={i} className={`mood-btn ${night.mood===m?'selected':''}`} onClick={()=>nSet('mood',m)}>{m}</button>
                 ))}
               </div>
+            </div>
+
+            <div className="slider-group">
+              <div className="slider-header">
+                <span className="form-label">体調</span>
+                <span className="slider-val">{night.bodyCondition}/5</span>
+              </div>
+              <input type="range" min="1" max="5" step="0.1" value={night.bodyCondition} onChange={e=>nSet('bodyCondition',Math.round(+e.target.value*10)/10)}/>
             </div>
 
             {/* 運動 (気分の下) */}
@@ -1970,9 +2097,9 @@ function HistoryPage() {
     });
     lines.push('');
     lines.push('## 夜ログ');
-    lines.push(row('日付','就寝予定','気分','運動','運動内容','明日の最優先タスク','感謝・よかったこと','振り返り'));
+    lines.push(row('日付','就寝予定','気分','体調','運動','運動内容','明日の最優先タスク','感謝・よかったこと','振り返り'));
     logs.filter(l => l.type === 'night').sort((a,b) => a.date.localeCompare(b.date)).forEach(l => {
-      lines.push(row(l.date, l.bedTime, l.mood,
+      lines.push(row(l.date, l.bedTime, l.mood, l.bodyCondition,
         l.exerciseDone === 'yes' ? 'やった' : l.exerciseDone === 'no' ? '休み' : '',
         l.exercise, l.tomorrowGoal, l.gratitude, l.reflection));
     });
@@ -2125,6 +2252,7 @@ function HistoryPage() {
           <div className="card-title">🌙 NIGHT LOG</div>
           <Field label="就寝" value={nLog.bedTime}/>
           <Field label="気分" value={nLog.mood}/>
+          <Bar label="体調" value={nLog.bodyCondition}/>
           {nLog.exerciseDone && (
             <Field label="運動"
               value={nLog.exerciseDone === 'yes'

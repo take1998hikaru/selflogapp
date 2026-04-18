@@ -2258,6 +2258,17 @@ function HistoryPage() {
             }}>
               🤖 AIレポート
             </button>
+            <button
+              onClick={() => { window.location.href = '/api/export/weekly?days=7'; }}
+              title="claude.ai Projects 用の週次データパッケージ（zip）をダウンロード"
+              style={{
+                padding: '6px 12px', background: 'transparent',
+                border: '1px solid var(--blue)', borderRadius: 8,
+                color: 'var(--blue)', fontFamily: 'inherit', fontSize: '0.72rem',
+                cursor: 'pointer', whiteSpace: 'nowrap', fontWeight: 600,
+              }}>
+              📦 週次DL
+            </button>
             <button onClick={() => DB.exportCSV()} style={{
               padding: '6px 12px', background: 'transparent',
               border: '1px solid var(--accent)', borderRadius: 8,

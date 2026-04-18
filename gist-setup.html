@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gist同期セットアップ</title>
+<style>
+  body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 640px; margin: 0 auto; padding: 20px; background: #f8f9fa; color: #1a1a1a; line-height: 1.6; }
+  h1 { font-size: 1.3rem; }
+  h2 { font-size: 1rem; margin-top: 24px; border-left: 3px solid #4caf50; padding-left: 10px; }
+  .card { background: white; border-radius: 8px; padding: 16px; box-shadow: 0 1px 3px rgba(0,0,0,.1); margin-bottom: 16px; }
+  label { display: block; font-weight: 600; margin-top: 12px; font-size: 0.9rem; }
+  input, button { width: 100%; padding: 10px; font-size: 1rem; border: 1px solid #ccc; border-radius: 4px; margin-top: 4px; box-sizing: border-box; }
+  input[type=password] { font-family: monospace; }
+  button { background: #4caf50; color: white; border: none; cursor: pointer; margin-top: 16px; font-weight: 600; }
+  button:hover { background: #43a047; }
+  button.secondary { background: #607d8b; }
+  #result { padding: 12px; border-radius: 4px; margin-top: 12px; display: none; white-space: pre-wrap; font-family: monospace; font-size: 0.85rem; }
+  #result.ok { background: #e8f5e9; border: 1px solid #4caf50; color: #2e7d32; display: block; }
+  #result.ng { background: #ffebee; border: 1px solid #f44336; color: #c62828; display: block; }
+  .hint { font-size: 0.85rem; color: #666; margin-top: 4px; }
+  code { background: #f0f0f0; padding: 2px 6px; border-radius: 3px; font-size: 0.85rem; }
+  .step { counter-increment: step; position: relative; padding-left: 36px; margin: 12px 0; }
+  .step::before { content: counter(step); position: absolute; left: 0; top: 0; width: 26px; height: 26px; border-radius: 50%; background: #4caf50; color: white; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 0.85rem; }
+  ol.steps { counter-reset: step; list-style: none; padding: 0; }
+</style>
+</head>
+<body>
+  <h1>🔑 Gist同期セットアップ</h1>
+  <p>サーバ側が定期的にGistからデータを取得して <code>data/store.json</code> を最新に保つための設定です。</p>
+
+  <div class="card">
+    <h2>状態</h2>
+    <div id="status">読込中...</div>
+  </div>
+
+  <div class="card">
+    <h2>設定</h2>
+    <ol class="steps">
+      <li class="step"><strong>スマホで普段使っているGitHubトークン</strong>をそのまま入力してください。</li>
+      <li class="step">新規トークンを使う場合は <a href="https://github.com/settings/tokens/new?scopes=gist&description=selfcare-log-server-pull" target="_blank" rel="noopener">ここから発行</a>（スコープ: <code>gist</code> のみ）</li>
+      <li class="step">gist_idは空欄でOK（トークンから自動発見します）。分かっている場合は入れてください。</li>
+    </ol>
+
+    <label>GitHub Personal Access Token <span style="color:#f44336">*</span></label>
+    <input type="password" id="token" placeholder="ghp_... または github_pat_..." autocomplete="off">
+    <div class="hint">サーバ側の <code>data/gist_config.json</code> にのみ保存されます（.gitignoreで保護済み）</div>
+
+    <label>Gist ID（任意・自動発見可）</label>
+    <input type="text" id="gist_id" placeholder="空欄で自動発見">
+
+    <button id="submit">保存してプル実行</button>
+    <button class="secondary" id="pullNow" style="margin-top: 8px;">いますぐプル実行（既に設定済みの場合）</button>
+    <div id="result"></div>
+  </div>
+
+  <div class="card">
+    <h2>仕組み</h2>
+    <p style="font-size: 0.9rem;">
+      保存するとサーバが <strong>10分ごとに</strong> Gist API を叩いて <code>selfcare_log_data.json</code> を取得し、<br>
+      ローカルの <code>store.json</code> にマージ（更新時刻の新しいほうを採用）します。<br>
+      スマホから入力したログが自動でPC側にも反映されます。
+    </p>
+  </div>
+
+  <div class="card">
+    <h2>🤖 claude.ai用スナップショット（B+D ハイブリッド）</h2>
+    <p style="font-size: 0.9rem;">
+      Gistプル後、直近14日分を以下に自動生成します：<br>
+      📁 <code>data/for_ai/</code>（ローカル・ファイル方式 B）<br>
+      ☁️ 同じGist内に追加ファイル <code>weekly_summary.md</code>, <code>logs.json</code>, <code>switchbot_week.json</code>, <code>profile.md</code>, <code>context.md</code>（URL方式 D）
+    </p>
+    <button class="secondary" id="snapshotNow">スナップショットを今すぐ再生成</button>
+    <div id="snapResult" style="padding: 12px; border-radius: 4px; margin-top: 12px; display: none; white-space: pre-wrap; font-family: monospace; font-size: 0.8rem; background: #f0f0f0;"></div>
+    <p style="font-size: 0.85rem; color: #666; margin-top: 12px;">
+      ローカルファイルは <code>C:\Users\take1\Claude-test\log-app\data\for_ai\</code><br>
+      claude.aiプロジェクトで分析するときは、Gist内の raw URL を指示欄に貼ると毎回最新データで分析できます。
+    </p>
+  </div>
+
+<script>
+async function loadStatus() {
+  try {
+    const s = await fetch('/api/gist/status').then(r => r.json());
+    document.getElementById('status').innerHTML = s.configured
+      ? `✅ 設定済み（gist_id: <code>${s.gist_id.slice(0,8)}...</code>, 間隔: ${s.poll_interval_sec}秒）`
+      : '⚠️ 未設定';
+  } catch(e) {
+    document.getElementById('status').innerHTML = '<span style="color:#f44336">ステータス取得失敗: ' + e + '</span>';
+  }
+}
+loadStatus();
+
+document.getElementById('submit').addEventListener('click', async () => {
+  const token = document.getElementById('token').value.trim();
+  const gist_id = document.getElementById('gist_id').value.trim();
+  const r = document.getElementById('result');
+  if (!token) { r.className = 'ng'; r.textContent = 'トークンを入力してください'; return; }
+  r.className = ''; r.style.display = 'block'; r.textContent = '保存中...';
+  try {
+    const res = await fetch('/api/gist/config', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ token, gist_id })
+    }).then(x => x.json());
+    if (res.ok) {
+      r.className = 'ok';
+      r.textContent = `✅ 保存成功\ngist_id: ${res.gist_id}\n初回プル: ${res.pull_ok ? 'OK' : 'NG'}\n詳細: ${res.pull_message}`;
+      document.getElementById('token').value = '';
+      loadStatus();
+    } else {
+      r.className = 'ng';
+      r.textContent = '❌ ' + (res.error || '不明なエラー');
+    }
+  } catch(e) {
+    r.className = 'ng';
+    r.textContent = '❌ 通信エラー: ' + e;
+  }
+});
+
+document.getElementById('pullNow').addEventListener('click', async () => {
+  const r = document.getElementById('result');
+  r.className = ''; r.style.display = 'block'; r.textContent = 'プル中...';
+  try {
+    const res = await fetch('/api/gist/pull', { method: 'POST' }).then(x => x.json());
+    r.className = res.ok ? 'ok' : 'ng';
+    r.textContent = (res.ok ? '✅ ' : '❌ ') + (res.message || '');
+  } catch(e) {
+    r.className = 'ng';
+    r.textContent = '❌ 通信エラー: ' + e;
+  }
+});
+
+document.getElementById('snapshotNow').addEventListener('click', async () => {
+  const r = document.getElementById('snapResult');
+  r.style.display = 'block'; r.textContent = '生成中...';
+  try {
+    const res = await fetch('/api/snapshot/rebuild', { method: 'POST' }).then(x => x.json());
+    const lines = [];
+    lines.push('local: ' + (res.local ? '✅' : '❌ ' + (res.local_error || '')));
+    lines.push('gist: ' + (res.gist ? '✅' : '❌ ' + (res.gist_detail || '')));
+    if (res.gist_detail && typeof res.gist_detail === 'object' && res.gist_detail.raw_urls) {
+      lines.push('');
+      lines.push('📎 Gist raw URLs (claude.aiで使用):');
+      for (const [name, url] of Object.entries(res.gist_detail.raw_urls)) {
+        lines.push('  ' + name + ':');
+        lines.push('    ' + url);
+      }
+    }
+    r.textContent = lines.join('\n');
+  } catch(e) {
+    r.textContent = '❌ 通信エラー: ' + e;
+  }
+});
+</script>
+</body>
+</html>

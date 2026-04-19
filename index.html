@@ -1202,13 +1202,33 @@ function Home({ navigate }) {
   }, []);
 
   useEffect(() => {
-    fetchWeatherForecast().then(f => { if (f) setForecast(f); });
-    refresh();
-    loadBriefing();
+    const refreshAll = () => {
+      fetchWeatherForecast().then(f => { if (f) setForecast(f); });
+      refresh();
+      loadBriefing();
+    };
+    refreshAll();
+
     // 季節を設定
     const m = new Date().getMonth() + 1;
     const season = m >= 3 && m <= 5 ? 'spring' : m >= 6 && m <= 8 ? 'summer' : m >= 9 && m <= 11 ? 'autumn' : 'winter';
     document.body.setAttribute('data-season', season);
+
+    // 15分ごとに天気・ブリーフィングを自動更新
+    const interval = setInterval(refreshAll, 15 * 60 * 1000);
+
+    // タブがアクティブになったタイミングでも更新
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') refreshAll();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('focus', refreshAll);
+
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('focus', refreshAll);
+    };
   }, []);
 
   // チェック即完了ハンドラ
